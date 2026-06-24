@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>resp2chat - LLM API 代理</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div x-data="app()" x-init="init()">
+        <nav class="navbar">
+            <div class="nav-brand">resp2chat</div>
+            <div class="nav-links">
+                <a href="/" :class="{'active': page === 'dashboard'}">仪表盘</a>
+                <a href="/channels.html" :class="{'active': page === 'channels'}">渠道</a>
+                <a href="/keys.html" :class="{'active': page === 'keys'}">Keys</a>
+                <a href="/logs.html" :class="{'active': page === 'logs'}">日志</a>
+                <a href="/settings.html" :class="{'active': page === 'settings'}">设置</a>
+            </div>
+        </nav>
+
+        <div class="container">
+            <h1>仪表盘</h1>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">渠道数</div>
+                    <div class="stat-value" x-text="stats.channels?.length || 0"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">日志总数</div>
+                    <div class="stat-value" x-text="stats.log_count || 0"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">健康状态</div>
+                    <div class="stat-value text-green">正常</div>
+                </div>
+            </div>
+
+            <h2>渠道状态</h2>
+            <div class="channel-grid">
+                <template x-for="ch in stats.channels || []" :key="ch.id">
+                    <div class="channel-card">
+                        <div class="channel-header">
+                            <span class="channel-name" x-text="ch.name"></span>
+                            <span class="badge" :class="ch.enabled ? 'badge-green' : 'badge-red'"
+                                  x-text="ch.enabled ? '启用' : '禁用'"></span>
+                        </div>
+                        <div class="channel-info">
+                            <div>API 类型: <span x-text="ch.wire_api"></span></div>
+                            <div>Key 数: <span x-text="ch.key_count"></span></div>
+                        </div>
+                        <div class="channel-keys">
+                            <template x-for="k in ch.key_stats || []" :key="k.name">
+                                <div class="key-row">
+                                    <span class="key-name" x-text="k.name"></span>
+                                    <span class="badge" :class="k.paused ? 'badge-red' : 'badge-green'"
+                                          x-text="k.paused ? '暂停' : '活跃'"></span>
+                                    <span class="key-stat">请求: <span x-text="k.request_count"></span></span>
+                                    <span class="key-stat">错误: <span x-text="k.error_count"></span></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    function app() {
+        return {
+            page: 'dashboard',
+            stats: {},
+            async init() {
+                await this.fetchStats();
+            },
+            async fetchStats() {
+                try {
+                    const res = await fetch('/admin/api/stats');
+                    this.stats = await res.json();
+                } catch (e) {
+                    console.error('Failed to fetch stats:', e);
+                }
+            }
+        };
+    }
+    </script>
+</body>
+</html>

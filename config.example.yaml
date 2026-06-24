@@ -1,0 +1,89 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  api_token: ""
+
+logging:
+  level: "info"
+  file: ""
+  max_size_mb: 100
+  max_backups: 3
+  log_request_body: false
+  log_io: false
+
+database:
+  path: "./data/proxy.db"
+
+channels:
+  - id: "mimo"
+    name: "MiMo"
+    base_url: "https://api.xiaomimimo.com/v1"
+    wire_api: "chat"
+    enabled: true
+    models:
+      - id: "mimo-v2.5-pro"
+        display_name: "MiMo V2.5 Pro"
+        context_window: 1000000
+        max_output_tokens: 131072
+        supports_images: false
+        supports_reasoning: true
+      - id: "mimo-v2.5"
+        display_name: "MiMo V2.5 (Vision)"
+        context_window: 1000000
+        supports_images: true
+        supports_reasoning: true
+    default_model: "mimo-v2.5-pro"
+    keys:
+      - value: "sk-your-mimo-key-here"
+        name: "主 key"
+    key_strategy: "round-robin"
+    max_retries: 2
+    retry_delay_ms: 500
+    request_timeout_ms: 60000
+    fanout:
+      enabled: false
+      count: 2
+      wait_all: false
+    thinking:
+      default_enabled: true
+      force_high_effort: false
+    web_search:
+      enabled: false
+    retry:
+      retry_delay_429_ms: 1000
+      max_rotation_rounds: 3
+      max_total_wait_ms: 30000
+      consec_error_threshold: 3
+      pause_multiplier_sec: 30
+      pause_max_sec: 600
+
+  - id: "deepseek"
+    name: "DeepSeek"
+    base_url: "https://api.deepseek.com/v1"
+    wire_api: "chat"
+    enabled: true
+    models:
+      - id: "deepseek-v4-pro"
+        display_name: "DeepSeek V4 Pro"
+        context_window: 1000000
+        supports_reasoning: true
+      - id: "deepseek-v4-flash"
+        display_name: "DeepSeek V4 Flash"
+        context_window: 1000000
+        supports_reasoning: true
+        aliases:
+          - "deepseek-chat"
+          - "deepseek-reasoner"
+    default_model: "deepseek-v4-pro"
+    keys:
+      - value: "sk-your-deepseek-key-here"
+        name: "主 key"
+    key_strategy: "round-robin"
+    max_retries: 2
+    retry:
+      retry_delay_429_ms: 1000
+      max_rotation_rounds: 3
+      max_total_wait_ms: 30000
+      consec_error_threshold: 3
+      pause_multiplier_sec: 30
+      pause_max_sec: 600
