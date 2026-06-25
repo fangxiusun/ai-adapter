@@ -13,7 +13,7 @@ import (
 
 type FanoutRequest struct {
 	Body      interface{}
-	Path      string
+	URL       string
 	Headers   map[string]string
 }
 
@@ -82,7 +82,7 @@ func (ch *Channel) sendRequest(ctx context.Context, key *KeyEntry, req FanoutReq
 		return &FanoutResult{Key: key.Value, Error: fmt.Errorf("marshal body: %w", err)}
 	}
 
-	url := ch.Config.BaseURL + req.Path
+	url := req.URL
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return &FanoutResult{Key: key.Value, Error: fmt.Errorf("create request: %w", err)}

@@ -1,16 +1,16 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>resp2chat - LLM API 代理</title>
+    <title>ai-adapter - LLM API 代理</title>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div x-data="app()" x-init="init()">
         <nav class="navbar">
-            <div class="nav-brand">resp2chat</div>
+            <div class="nav-brand">ai-adapter</div>
             <div class="nav-links">
                 <a href="/" :class="{'active': page === 'dashboard'}">仪表盘</a>
                 <a href="/channels.html" :class="{'active': page === 'channels'}">渠道</a>
@@ -48,7 +48,7 @@
                                   x-text="ch.enabled ? '启用' : '禁用'"></span>
                         </div>
                         <div class="channel-info">
-                            <div>API 类型: <span x-text="ch.wire_api"></span></div>
+                            <div>Chat: <span x-text="ch.chat_url ? '✓' : '✗'"></span> | Responses: <span x-text="ch.responses_url ? '✓' : '✗'"></span> | Messages: <span x-text="ch.messages_url ? '✓' : '✗'"></span> | Gemini: <span x-text="ch.generate_content_url ? '✓' : '✗'"></span></div>
                             <div>Key 数: <span x-text="ch.key_count"></span></div>
                         </div>
                         <div class="channel-keys">

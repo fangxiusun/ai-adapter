@@ -1,87 +1,105 @@
-# resp2chat API 接口文档
+# ai-adapter API 接口文档
 
 ## 1. 概述
 
-resp2chat 提供两类 API：
+ai-adapter 提供两类 API：
 
-- **代理 API**：面向 LLM 客户端的请求端点
+- **代理 API**：面向 LLM 客户端，支持四类协议端点
 - **Admin API**：面向管理界面的 REST 端点
 
 基础地址：`http://localhost:8080`（默认）
 
 ## 2. 代理 API
 
-### 2.1 POST /v1/responses
+### 2.1 POST /v1/chat/completions
 
-**用途**：Responses API 端点（Codex 使用）
-
-**请求体**：OpenAI Responses API 格式
-
-```json
-{
-  "model": "mimo-v2.5-pro",
-  "input": [
-    {
-      "type": "message",
-      "role": "user",
-      "content": [{"type": "input_text", "text": "Hello"}]
-    }
-  ],
-  "instructions": "You are a helpful assistant.",
-  "tools": [...],
-  "stream": true,
-  "reasoning": {"effort": "high"}
-}
-```
-
-**响应**：Responses API 格式（流式为 SSE）
-
-**翻译逻辑**：
-- `instructions` → `messages[0]` (system)
-- `input[]` → `messages[]` (user/assistant/tool)
-- `tools[]` → Chat 格式工具
-- `reasoning.effort` → `reasoning_effort`
-
-### 2.2 POST /v1/chat/completions
-
-**用途**：Chat Completions API 端点
-
-**请求体**：OpenAI Chat Completions 格式
+OpenAI Chat Completions 协议。
 
 ```json
 {
   "model": "mimo-v2.5-pro",
   "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello"}
   ],
-  "stream": true,
+  "stream": false,
+  "temperature": 0.7,
   "max_completion_tokens": 4096
 }
 ```
 
-**响应**：Chat Completions 格式
+### 2.2 POST /v1/responses
 
-### 2.3 渠道路由
+OpenAI Responses 协议。
 
-请求通过 `model` 字段自动路由到匹配的渠道：
-
+```json
+{
+  "model": "mimo-v2.5-pro",
+  "input": [
+    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]}
+  ],
+  "instructions": "You are a helpful assistant.",
+  "stream": true,
+  "reasoning": {"effort": "high"}
+}
 ```
+
+### 2.3 POST /v1/messages
+
+Anthropic Claude Messages 协议。
+
+```json
+{
+  "model": "claude-sonnet-4-20250514",
+  "max_tokens": 4096,
+  "system": "You are a helpful assistant.",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ],
+  "stream": false
+}
+```
+
+支持 Claude 特有字段：`system`（系统提示）、`tools`（工具定义，使用 `input_schema`）、`tool_choice`、`stop_sequences`。
+
+### 2.4 POST /v1beta/models/{model}:generateContent
+
+Google Gemini generateContent 协议（非流式）。
+
+```json
+{
+  "contents": [
+    {"role": "user", "parts": [{"text": "Hello"}]}
+  ],
+  "generationConfig": {
+    "temperature": 0.7,
+    "maxOutputTokens": 4096
+  }
+}
+```
+
+### 2.5 POST /v1beta/models/{model}:streamGenerateContent
+
+Google Gemini 流式协议。请求体与非流式相同，URL 路径中使用 `streamGenerateContent`。
+
+### 2.6 渠道路由
+
+请求通过 `model` 字段（或 Gemini URL 路径中的模型名）自动路由到匹配的渠道：
+
 1. 遍历所有启用的渠道
-2. 检查渠道的 models 列表是否包含请求的 model
-3. 如果匹配 → 使用该渠道
-4. 如果不匹配 → 使用默认渠道的 default_model
-```
+2. 检查渠道的 `models` 列表（含 `aliases`）是否匹配
+3. 匹配到则使用该渠道
+4. 均未匹配则回退到默认渠道的 `default_model`
 
-### 2.4 翻译方向
+### 2.7 接口能力与转换
 
-根据渠道的 `wire_api` 配置决定翻译方向：
+系统根据目标接口和渠道的接口能力 URL 自动决策：
 
-| 客户端请求 | 渠道 wire_api | 翻译方向 |
-|-----------|--------------|----------|
-| Responses | `chat` | Responses → Chat |
-| Responses | `responses` | 透传 |
-| Chat | `chat` | 透传 |
-| Chat | `responses` | Chat → Responses |
+- **原生转发**：渠道配置了目标接口 URL → 直接转发（复杂度 0）
+- **协议转换**：从已配置的源接口中选择复杂度最低的路径
+- **无可用路径**：返回 503 `no_conversion_path`
+
+支持全部 12 个方向的非流式和流式转换。
 
 ## 3. Admin API
 
@@ -89,19 +107,14 @@ resp2chat 提供两类 API：
 
 **GET /admin/api/health**
 
-**响应**：
 ```json
-{
-  "ok": true,
-  "version": "1.0.0"
-}
+{"ok": true, "version": "1.0.0"}
 ```
 
 ### 3.2 统计信息
 
 **GET /admin/api/stats**
 
-**响应**：
 ```json
 {
   "log_count": 1234,
@@ -111,17 +124,7 @@ resp2chat 提供两类 API：
       "name": "MiMo",
       "enabled": true,
       "key_count": 2,
-      "key_stats": [
-        {
-          "name": "主 key",
-          "request_count": 500,
-          "error_count": 10,
-          "avg_latency_ms": 1234,
-          "last_success_time": "2024-01-01T12:00:00Z",
-          "last_error_time": "2024-01-01T11:00:00Z",
-          "paused": false
-        }
-      ]
+      "key_stats": [...]
     }
   ]
 }
@@ -129,80 +132,38 @@ resp2chat 提供两类 API：
 
 ### 3.3 渠道管理
 
-**GET /admin/api/channels** — 渠道列表
-
-**GET /admin/api/channels/:id** — 渠道详情
-
-**POST /admin/api/channels/:id/test** — 测试渠道
-
-**响应**：
-```json
-{
-  "ok": true,
-  "key": "主 key",
-  "status": "available"
-}
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/api/channels` | 渠道列表（含接口能力 URL、Key 统计） |
+| GET | `/admin/api/channels/:id` | 渠道详情 |
+| POST | `/admin/api/channels/:id/test` | 测试渠道 Key 可用性 |
 
 ### 3.4 Key 管理
 
-**GET /admin/api/channels/:id/keys** — Key 列表
-
-**POST /admin/api/channels/:id/keys** — Key 操作
-
-**请求体**：
-```json
-{
-  "action": "pause",  // "pause" | "resume"
-  "key": "主 key"
-}
-```
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/api/channels/:id/keys` | Key 列表及状态 |
+| POST | `/admin/api/channels/:id/keys` | 操作：`{"action":"pause","key":"name"}` 或 `{"action":"resume","key":"name"}` |
 
 ### 3.5 日志查询
 
 **GET /admin/api/logs**
 
-**查询参数**：
-- `channel`：渠道 ID
-- `statusMin` / `statusMax`：状态码范围
-- `from` / `to`：时间戳范围
-- `limit`：返回数量（默认 100）
-- `offset`：偏移量
-
-**响应**：
-```json
-{
-  "logs": [
-    {
-      "id": 1,
-      "request_id": "req_1234567890",
-      "timestamp": 1704067200000,
-      "channel_id": "mimo",
-      "model": "mimo-v2.5-pro",
-      "status_code": 200,
-      "latency_ms": 1234,
-      "key_name": "sk-x***xxx"
-    }
-  ]
-}
-```
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `channel` | string | 渠道 ID 过滤 |
+| `statusMin` / `statusMax` | int | 状态码范围 |
+| `from` / `to` | int | 时间戳范围（毫秒） |
+| `limit` | int | 返回数量（默认 100） |
+| `offset` | int | 偏移量 |
 
 ### 3.6 配置查看
 
 **GET /admin/api/config**
 
-**响应**：
-```json
-{
-  "server": {"host": "0.0.0.0", "port": 8080},
-  "logging": {"level": "info"},
-  "channels": 2
-}
-```
+返回服务器、日志、渠道数量等摘要信息。
 
 ## 4. SSE 事件格式
-
-流式响应使用 Server-Sent Events：
 
 ### 4.1 Responses SSE
 
@@ -210,20 +171,11 @@ resp2chat 提供两类 API：
 event: response.created
 data: {"type":"response.created","response":{...},"sequence_number":0}
 
-event: response.output_item.added
-data: {"type":"response.output_item.added","output_index":0,"item":{...},"sequence_number":1}
-
 event: response.output_text.delta
-data: {"type":"response.output_text.delta","delta":"Hello","sequence_number":2}
-
-event: response.output_text.done
-data: {"type":"response.output_text.done","text":"Hello world","sequence_number":3}
-
-event: response.output_item.done
-data: {"type":"response.output_item.done","output_index":0,"item":{...},"sequence_number":4}
+data: {"type":"response.output_text.delta","delta":"Hello","sequence_number":1}
 
 event: response.completed
-data: {"type":"response.completed","response":{...},"sequence_number":5}
+data: {"type":"response.completed","response":{...},"sequence_number":2}
 ```
 
 ### 4.2 Chat SSE
@@ -231,14 +183,42 @@ data: {"type":"response.completed","response":{...},"sequence_number":5}
 ```
 data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"}}]}
 
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{"content":" world"}}]}
-
 data: [DONE]
+```
+
+### 4.3 Claude SSE
+
+```
+event: message_start
+data: {"type":"message_start","message":{...}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}
+
+event: message_stop
+data: {"type":"message_stop"}
+```
+
+### 4.4 Gemini 流式
+
+每行一个完整 JSON 对象（非 SSE 格式）：
+
+```json
+{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":10,"totalTokenCount":15}}
 ```
 
 ## 5. 错误格式
 
-所有 API 错误返回统一格式：
+所有 API 错误返回统一 JSON 格式：
 
 ```json
 {
@@ -251,14 +231,13 @@ data: [DONE]
 }
 ```
 
-| HTTP 状态码 | 错误代码 | 说明 |
-|------------|----------|------|
+| HTTP 码 | 错误代码 | 说明 |
+|---------|----------|------|
 | 400 | `invalid_json` | 请求体 JSON 解析失败 |
-| 400 | `missing_model` | 请求缺少 model 字段 |
-| 400 | `translate_failed` | 协议翻译失败 |
-| 404 | `no_channel` | 未找到匹配的渠道 |
-| 500 | `create_request_failed` | 创建上游请求失败 |
-| 502 | `upstream_error` | 上游返回错误（重试后仍失败） |
-| 502 | `invalid_upstream_response` | 上游响应格式错误 |
-| 502 | `all_retries_failed` | 所有重试都失败（含 401/429/5xx） |
-| 503 | `no_available_keys` | 所有 key 都不可用（401 永久跳过 + 暂停） |
+| 400 | `missing_model` | 请求缺少 model |
+| 400 | `convert_failed` | 协议转换失败 |
+| 404 | `no_channel` | 未找到匹配渠道 |
+| 502 | `upstream_error` | 上游错误（重试后仍失败） |
+| 503 | `no_available_keys` | 所有 Key 不可用 |
+| 503 | `no_conversion_path` | 无可用转换路径 |
+| 504 | `timeout` | 重试总超时 |

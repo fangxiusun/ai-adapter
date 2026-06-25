@@ -1,0 +1,1 @@
+{"model":"mimo-v2.5-pro","max_tokens":256,"system":"You are a helpful assistant.","messages":[{"role":"user","content":"用一句话介绍 Go 语言"}]}

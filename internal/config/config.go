@@ -9,9 +9,9 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	Database DatabaseConfig `yaml:"database"`
+	Server   ServerConfig    `yaml:"server"`
+	Logging  LoggingConfig   `yaml:"logging"`
+	Database DatabaseConfig  `yaml:"database"`
 	Channels []ChannelConfig `yaml:"channels"`
 }
 
@@ -22,23 +22,24 @@ type ServerConfig struct {
 }
 
 type LoggingConfig struct {
-	Level         string `yaml:"level"`
-	File          string `yaml:"file"`
-	MaxSizeMB     int    `yaml:"max_size_mb"`
-	MaxBackups    int    `yaml:"max_backups"`
-	LogRequestBody bool  `yaml:"log_request_body"`
-	LogIO         bool   `yaml:"log_io"`
+	Level          string `yaml:"level"`
+	File           string `yaml:"file"`
+	MaxSizeMB      int    `yaml:"max_size_mb"`
+	MaxBackups     int    `yaml:"max_backups"`
+	LogRequestBody bool   `yaml:"log_request_body"`
+	LogIO          bool   `yaml:"log_io"`
 }
 
 type DatabaseConfig struct {
 	Path string `yaml:"path"`
 }
 
+// ChannelConfig defines a channel with interface capability URLs.
+// The old wire_api field has been removed. Each channel declares native
+// support for interfaces by setting the corresponding URL.
 type ChannelConfig struct {
 	ID               string         `yaml:"id"`
 	Name             string         `yaml:"name"`
-	BaseURL          string         `yaml:"base_url"`
-	WireAPI          string         `yaml:"wire_api"`
 	Enabled          bool           `yaml:"enabled"`
 	Models           []ModelConfig  `yaml:"models"`
 	DefaultModel     string         `yaml:"default_model"`
@@ -51,21 +52,22 @@ type ChannelConfig struct {
 	Thinking         ThinkingConfig `yaml:"thinking"`
 	WebSearch        WebSearchConfig `yaml:"web_search"`
 	Retry            RetryConfig    `yaml:"retry"`
+
+	// Interface capability URLs. Setting a URL means the channel natively
+	// supports that interface. Base URLs must NOT include /v1 or /v1beta paths.
+	ChatURL            string `yaml:"chat_url"`
+	ResponsesURL       string `yaml:"responses_url"`
+	MessagesURL        string `yaml:"messages_url"`
+	GenerateContentURL string `yaml:"generate_content_url"`
 }
 
 type RetryConfig struct {
-	// 429 重试延迟（ms），key 轮转时的等待时间
-	RetryDelay429Ms int `yaml:"retry_delay_429_ms"`
-	// 所有 key 都返回 429 时，从头重新轮转的最大次数
-	MaxRotationRounds int `yaml:"max_rotation_rounds"`
-	// 最大总等待时间（ms），超时返回最后一个响应给客户端
-	MaxTotalWaitMs int `yaml:"max_total_wait_ms"`
-	// 自动暂停：连续错误达到此次数时暂停 key
+	RetryDelay429Ms      int `yaml:"retry_delay_429_ms"`
+	MaxRotationRounds    int `yaml:"max_rotation_rounds"`
+	MaxTotalWaitMs       int `yaml:"max_total_wait_ms"`
 	ConsecErrorThreshold int `yaml:"consec_error_threshold"`
-	// 429 暂停时间倍数（秒），实际暂停 = (连续错误数 - 阈值 + 1) × 此值
-	PauseMultiplierSec int `yaml:"pause_multiplier_sec"`
-	// 429 暂停最大时间（秒）
-	PauseMaxSec int `yaml:"pause_max_sec"`
+	PauseMultiplierSec   int `yaml:"pause_multiplier_sec"`
+	PauseMaxSec          int `yaml:"pause_max_sec"`
 }
 
 type ModelConfig struct {
@@ -107,6 +109,9 @@ func Load(path string) (*Config, error) {
 }
 
 func Parse(data []byte) (*Config, error) {
+	if err := checkForbiddenKeys(data); err != nil {
+		return nil, err
+	}
 	cfg := &Config{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -116,6 +121,25 @@ func Parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// checkForbiddenKeys detects deprecated config fields and returns a clear error.
+func checkForbiddenKeys(data []byte) error {
+	var raw struct {
+		Channels []struct {
+			ID      string  `yaml:"id"`
+			WireAPI *string `yaml:"wire_api"`
+		} `yaml:"channels"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	for _, ch := range raw.Channels {
+		if ch.WireAPI != nil {
+			return fmt.Errorf("channel %s: wire_api has been removed, use interface capability URLs instead (chat_url, responses_url, messages_url, generate_content_url)", ch.ID)
+		}
+	}
+	return nil
 }
 
 func (c *Config) applyDefaults() {
@@ -188,17 +212,14 @@ func (c *Config) validate() error {
 			return fmt.Errorf("duplicate channel id: %s", ch.ID)
 		}
 		ids[ch.ID] = true
-		if ch.BaseURL == "" {
-			return fmt.Errorf("channel %s: base_url is required", ch.ID)
-		}
-		if ch.WireAPI != "chat" && ch.WireAPI != "responses" {
-			return fmt.Errorf("channel %s: wire_api must be 'chat' or 'responses'", ch.ID)
-		}
 		if len(ch.Keys) == 0 {
 			return fmt.Errorf("channel %s: at least one key is required", ch.ID)
 		}
 		if len(ch.Models) == 0 {
 			return fmt.Errorf("channel %s: at least one model is required", ch.ID)
+		}
+		if !ch.HasAnyCapability() {
+			return fmt.Errorf("channel %s: at least one interface capability URL is required (chat_url, responses_url, messages_url, generate_content_url)", ch.ID)
 		}
 	}
 	return nil
@@ -206,4 +227,39 @@ func (c *Config) validate() error {
 
 func (c *Config) GetTimeout() time.Duration {
 	return 60 * time.Second
+}
+
+// HasAnyCapability returns true if the channel has at least one interface URL configured.
+func (ch *ChannelConfig) HasAnyCapability() bool {
+	return ch.ChatURL != "" || ch.ResponsesURL != "" || ch.MessagesURL != "" || ch.GenerateContentURL != ""
+}
+
+// HasNative returns true if the channel natively supports the given interface.
+func (ch *ChannelConfig) HasNative(iface InterfaceType) bool {
+	switch iface {
+	case InterfaceChat:
+		return ch.ChatURL != ""
+	case InterfaceResponses:
+		return ch.ResponsesURL != ""
+	case InterfaceMessages:
+		return ch.MessagesURL != ""
+	case InterfaceGenerateContent:
+		return ch.GenerateContentURL != ""
+	}
+	return false
+}
+
+// NativeBaseURL returns the base URL for the given interface, or empty string.
+func (ch *ChannelConfig) NativeBaseURL(iface InterfaceType) string {
+	switch iface {
+	case InterfaceChat:
+		return ch.ChatURL
+	case InterfaceResponses:
+		return ch.ResponsesURL
+	case InterfaceMessages:
+		return ch.MessagesURL
+	case InterfaceGenerateContent:
+		return ch.GenerateContentURL
+	}
+	return ""
 }

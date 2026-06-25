@@ -1,4 +1,4 @@
-server:
+﻿server:
   host: "0.0.0.0"
   port: 8080
   api_token: ""
@@ -17,9 +17,11 @@ database:
 channels:
   - id: "mimo"
     name: "MiMo"
-    base_url: "https://api.xiaomimimo.com/v1"
-    wire_api: "chat"
     enabled: true
+    # Interface capability URLs. Setting a URL means the channel natively supports that interface.
+    # Base URLs must NOT include /v1 or /v1beta paths.
+    chat_url: "https://api.xiaomimimo.com"
+    responses_url: "https://api.xiaomimimo.com"
     models:
       - id: "mimo-v2.5-pro"
         display_name: "MiMo V2.5 Pro"
@@ -59,9 +61,8 @@ channels:
 
   - id: "deepseek"
     name: "DeepSeek"
-    base_url: "https://api.deepseek.com/v1"
-    wire_api: "chat"
     enabled: true
+    chat_url: "https://api.deepseek.com"
     models:
       - id: "deepseek-v4-pro"
         display_name: "DeepSeek V4 Pro"

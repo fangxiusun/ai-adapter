@@ -49,8 +49,7 @@ func (h *WebHandler) handleChannels(w http.ResponseWriter, r *http.Request) {
 			list = append(list, map[string]interface{}{
 				"id":            ch.Config.ID,
 				"name":          ch.Config.Name,
-				"base_url":      ch.Config.BaseURL,
-				"wire_api":      ch.Config.WireAPI,
+				"chat_url": ch.Config.ChatURL, "responses_url": ch.Config.ResponsesURL, "messages_url": ch.Config.MessagesURL, "generate_content_url": ch.Config.GenerateContentURL,
 				"enabled":       ch.Config.Enabled,
 				"default_model": ch.Config.DefaultModel,
 				"key_count":     len(ch.Config.Keys),
@@ -91,8 +90,7 @@ func (h *WebHandler) handleChannelByID(w http.ResponseWriter, r *http.Request) {
 		h.json(w, 200, map[string]interface{}{
 			"id":            ch.Config.ID,
 			"name":          ch.Config.Name,
-			"base_url":      ch.Config.BaseURL,
-			"wire_api":      ch.Config.WireAPI,
+			"chat_url": ch.Config.ChatURL, "responses_url": ch.Config.ResponsesURL, "messages_url": ch.Config.MessagesURL, "generate_content_url": ch.Config.GenerateContentURL,
 			"enabled":       ch.Config.Enabled,
 			"default_model": ch.Config.DefaultModel,
 			"models":        ch.Config.Models,

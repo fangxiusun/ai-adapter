@@ -150,6 +150,7 @@ type ChatRequest struct {
 	StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
 	Thinking            *ThinkingConfig `json:"thinking,omitempty"`
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	Stop                []string        `json:"stop,omitempty"`
 }
 
 type StreamOptions struct {

@@ -26,19 +26,19 @@ type ChannelManager struct {
 }
 
 type ModelInfo struct {
-	ID              string
-	DisplayName     string
-	ContextWindow   int
-	MaxOutputTokens int
-	SupportsImages  bool
+	ID                string
+	DisplayName       string
+	ContextWindow     int
+	MaxOutputTokens   int
+	SupportsImages    bool
 	SupportsReasoning bool
-	Aliases         []string
+	Aliases           []string
 }
 
 func NewChannelManager(cfgs []config.ChannelConfig, logger *log.Logger) *ChannelManager {
 	cm := &ChannelManager{
-		channels:  make(map[string]*Channel),
-		logger:    logger,
+		channels: make(map[string]*Channel),
+		logger:   logger,
 	}
 	for i, cfg := range cfgs {
 		if i == 0 {
@@ -154,14 +154,6 @@ func (ch *Channel) KeyPool() *KeyPool {
 	return ch.keyPool
 }
 
-func (ch *Channel) UpstreamBaseURL() string {
-	return ch.Config.BaseURL
-}
-
-func (ch *Channel) WireAPI() string {
-	return ch.Config.WireAPI
-}
-
 func (ch *Channel) MaxRetries() int {
 	return ch.Config.MaxRetries
 }
@@ -181,4 +173,3 @@ func (ch *Channel) FanoutCount() int {
 func (ch *Channel) FanoutWaitAll() bool {
 	return ch.Config.Fanout.WaitAll
 }
-
