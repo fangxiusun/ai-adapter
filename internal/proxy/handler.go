@@ -14,6 +14,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/db"
+	"github.com/fangxiusun/ai-adapter/internal/debuglog"
 	"github.com/fangxiusun/ai-adapter/internal/log"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
 )
@@ -23,10 +24,11 @@ type ProxyHandler struct {
 	db       *db.DB
 	logger   *log.Logger
 	config   *config.Config
+	deepDebug *debuglog.DeepDebugLogger
 }
 
-func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config) *ProxyHandler {
-	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg}
+func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config, deepDebug *debuglog.DeepDebugLogger) *ProxyHandler {
+	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug}
 }
 
 type UpstreamResult struct {
@@ -80,6 +82,10 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	body = stripUTF8BOM(body)
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
+	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
+	deepLog.LogClientRequestHeader(r)
+	deepLog.LogClientRequestBody(body)
+	defer deepLog.Close()
 	var req translate.ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendError(w, 400, "invalid_json", err.Error())
@@ -99,7 +105,7 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		upstreamModel = modelInfo.ID
 	}
 	req.Model = upstreamModel
-	h.dispatch(w, r, reqID, ch, config.InterfaceChat, upstreamModel, req.Stream, body, &req)
+	h.dispatch(w, r, reqID, ch, config.InterfaceChat, upstreamModel, req.Stream, body, &req, deepLog)
 }
 
 func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +119,10 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	body = stripUTF8BOM(body)
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
+	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
+	deepLog.LogClientRequestHeader(r)
+	deepLog.LogClientRequestBody(body)
+	defer deepLog.Close()
 	var req translate.ResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendError(w, 400, "invalid_json", err.Error())
@@ -132,7 +142,7 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		upstreamModel = modelInfo.ID
 	}
 	req.Model = upstreamModel
-	h.dispatch(w, r, reqID, ch, config.InterfaceResponses, upstreamModel, req.Stream, body, &req)
+	h.dispatch(w, r, reqID, ch, config.InterfaceResponses, upstreamModel, req.Stream, body, &req, deepLog)
 }
 
 func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +156,10 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	body = stripUTF8BOM(body)
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
+	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
+	deepLog.LogClientRequestHeader(r)
+	deepLog.LogClientRequestBody(body)
+	defer deepLog.Close()
 	var req translate.ClaudeRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendError(w, 400, "invalid_json", err.Error())
@@ -165,7 +179,7 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		upstreamModel = modelInfo.ID
 	}
 	req.Model = upstreamModel
-	h.dispatch(w, r, reqID, ch, config.InterfaceMessages, upstreamModel, req.Stream, body, &req)
+	h.dispatch(w, r, reqID, ch, config.InterfaceMessages, upstreamModel, req.Stream, body, &req, deepLog)
 }
 
 func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +199,10 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 	body = stripUTF8BOM(body)
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
+	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
+	deepLog.LogClientRequestHeader(r)
+	deepLog.LogClientRequestBody(body)
+	defer deepLog.Close()
 	var req translate.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendError(w, 400, "invalid_json", err.Error())
@@ -199,12 +217,12 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 	if modelInfo != nil && modelInfo.ID != "" {
 		upstreamModel = modelInfo.ID
 	}
-	h.dispatch(w, r, reqID, ch, config.InterfaceGenerateContent, upstreamModel, stream, body, &req)
+	h.dispatch(w, r, reqID, ch, config.InterfaceGenerateContent, upstreamModel, stream, body, &req, deepLog)
 }
 
 // ==================== Core Dispatch ====================
 
-func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, model string, stream bool, rawBody []byte, targetReq interface{}) {
+func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, model string, stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog) {
 	source, ok := config.BestSourceForTarget(target, &ch.Config)
 	if !ok {
 		h.sendError(w, 503, "no_conversion_path",
@@ -213,7 +231,7 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 	}
 	h.logger.Debug("dispatch", "request_id", reqID, "target", target, "source", source, "native", source == target)
 	if source == target {
-		h.nativeForward(w, r, reqID, ch, source, rawBody, model, stream)
+		h.nativeForward(w, r, reqID, ch, source, rawBody, model, stream, deepLog)
 		return
 	}
 	chatReq, err := h.buildChatRequest(target, targetReq, model, stream)
@@ -222,9 +240,9 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 		return
 	}
 	if stream {
-		h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq)
+		h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
 	} else {
-		h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq)
+		h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
 	}
 }
 
@@ -250,7 +268,7 @@ func (h *ProxyHandler) buildChatRequest(target config.InterfaceType, targetReq i
 
 // ==================== Native Forwarding ====================
 
-func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, iface config.InterfaceType, body []byte, model string, stream bool) {
+func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, iface config.InterfaceType, body []byte, model string, stream bool, deepLog *debuglog.RequestLog) {
 	path := upstreamPathForInterface(iface, model, stream)
 	logPath := path
 	if idx := strings.Index(logPath, "?"); idx >= 0 {
@@ -274,6 +292,8 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
+		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
+		deepLog.LogUpstreamRequestBody(body)
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
 			ch.ReportError(key.Value, 0)
@@ -326,6 +346,10 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			io.Copy(w, resp.Body)
 		} else {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
+			deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
+			deepLog.LogUpstreamResponseBody(respBody)
+			deepLog.LogClientResponseHeader(resp.StatusCode, w.Header())
+			deepLog.LogClientResponseBody(respBody)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
 			w.Write(respBody)
@@ -340,7 +364,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 
 // ==================== Converted Forwarding (Non-Streaming) ====================
 
-func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}) {
+func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) {
 	sourceReq, err := convertChatToSource(source, chatReq)
 	if err != nil {
 		h.sendError(w, 400, "convert_to_source_failed", err.Error())
@@ -376,6 +400,8 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
 		h.logger.Debug("upstream request", "request_id", reqID, "method", "POST", "url", url, "body", string(sourceBody))
+		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
+		deepLog.LogUpstreamRequestBody(sourceBody)
 		start := time.Now()
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
@@ -425,6 +451,8 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		result = &UpstreamResult{Body: respBody, StatusCode: resp.StatusCode, Key: key, LatencyMs: latency}
 		break
 	}
+	deepLog.LogUpstreamResponseHeader(result.StatusCode, nil)
+	deepLog.LogUpstreamResponseBody(result.Body)
 	chatResp, err := convertSourceToChat(source, result.Body, chatReq)
 	if err != nil {
 		h.sendError(w, 502, "convert_from_source_failed", err.Error())
@@ -435,6 +463,8 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		h.sendError(w, 500, "convert_to_target_failed", err.Error())
 		return
 	}
+	deepLog.LogClientResponseHeader(200, w.Header())
+	deepLog.LogClientResponseBody(func() []byte { b, _ := json.Marshal(targetResp); return b }())
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(targetResp)
@@ -444,15 +474,15 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 
 // ==================== Converted Forwarding (Streaming) ====================
 
-func (h *ProxyHandler) convertedStreamForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}) {
+func (h *ProxyHandler) convertedStreamForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) {
 	if source == config.InterfaceChat {
-		h.streamFromChatSource(w, r, reqID, ch, target, chatReq, model, targetReq)
+		h.streamFromChatSource(w, r, reqID, ch, target, chatReq, model, targetReq, deepLog)
 		return
 	}
-	h.streamChainConversion(w, r, reqID, ch, source, target, chatReq, model, targetReq)
+	h.streamChainConversion(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
 }
 
-func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}) {
+func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) {
 	sourceBody, err := json.Marshal(chatReq)
 	if err != nil {
 		h.sendError(w, 500, "marshal_failed", err.Error())
@@ -478,6 +508,8 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
+		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
+		deepLog.LogUpstreamRequestBody(sourceBody)
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
 			ch.ReportError(key.Value, 0)
@@ -522,6 +554,8 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
+		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
+		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
 		flusher := func() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
@@ -530,6 +564,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
+		deepLog.LogClientResponseHeader(200, w.Header())
 		w.WriteHeader(200)
 		switch target {
 		case config.InterfaceChat:
@@ -550,7 +585,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}) {
+func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) {
 	sourceReq, err := convertChatToSource(source, chatReq)
 	if err != nil {
 		h.sendError(w, 400, "convert_to_source_failed", err.Error())
@@ -584,6 +619,8 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
+		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
+		deepLog.LogUpstreamRequestBody(sourceBody)
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
 			ch.ReportError(key.Value, 0)
@@ -636,6 +673,8 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		ch.ReportSuccess(key.Value)
+		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
+		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
 		flusher := func() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
@@ -644,6 +683,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("Connection", "keep-alive")
+		deepLog.LogClientResponseHeader(200, w.Header())
 		w.WriteHeader(200)
 		h.emitStreamResponse(w, target, chatResp, chatReq, targetReq, flusher)
 		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "")
