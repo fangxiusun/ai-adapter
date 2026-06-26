@@ -64,6 +64,7 @@ channels:
       consec_error_threshold: 3
       pause_multiplier_sec: 30
       pause_max_sec: 600
+    key_stats_sync_sec: 60  # Key 统计持久化到数据库的间隔（秒），默认 60
 
   - id: "deepseek"
     name: "DeepSeek"

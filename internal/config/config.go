@@ -52,6 +52,7 @@ type ChannelConfig struct {
 	Thinking         ThinkingConfig `yaml:"thinking"`
 	WebSearch        WebSearchConfig `yaml:"web_search"`
 	Retry            RetryConfig    `yaml:"retry"`
+	KeyStatsSyncSec  int            `yaml:"key_stats_sync_sec"`
 
 	// Interface capability URLs. Setting a URL means the channel natively
 	// supports that interface. Base URLs must NOT include /v1 or /v1beta paths.
@@ -196,6 +197,9 @@ func (c *Config) applyDefaults() {
 		if ch.Retry.PauseMaxSec == 0 {
 			ch.Retry.PauseMaxSec = 600
 		}
+		if ch.KeyStatsSyncSec == 0 {
+			ch.KeyStatsSyncSec = 60
+		}
 	}
 }
 
@@ -221,8 +225,25 @@ func (c *Config) validate() error {
 		if !ch.HasAnyCapability() {
 			return fmt.Errorf("channel %s: at least one interface capability URL is required (chat_url, responses_url, messages_url, generate_content_url)", ch.ID)
 		}
+		keyValues := make(map[string]bool)
+		for _, k := range ch.Keys {
+			if k.Value == "" {
+				return fmt.Errorf("channel %s: key value is required", ch.ID)
+			}
+			if keyValues[k.Value] {
+				return fmt.Errorf("channel %s: duplicate key value: %s", ch.ID, maskKeyValue(k.Value))
+			}
+			keyValues[k.Value] = true
+		}
 	}
 	return nil
+}
+
+func maskKeyValue(s string) string {
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "***" + s[len(s)-4:]
 }
 
 func (c *Config) GetTimeout() time.Duration {

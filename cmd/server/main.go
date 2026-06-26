@@ -56,7 +56,7 @@ func main() {
 	}
 	defer database.Close()
 
-	channels := channel.NewChannelManager(cfg.Channels, logger)
+	channels := channel.NewChannelManager(cfg.Channels, logger, database)
 	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger)
 	webHandler := web.NewWebHandler(channels, database, cfg)
 
@@ -112,6 +112,7 @@ func main() {
 	<-quit
 
 	logger.Info("shutting down")
+	channels.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	server.Shutdown(ctx)

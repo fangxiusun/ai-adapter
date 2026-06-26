@@ -70,6 +70,7 @@ func (db *DB) migrate() error {
 		`CREATE TABLE IF NOT EXISTS key_stats (
 			channel_id TEXT NOT NULL,
 			key_name TEXT NOT NULL,
+			key_value TEXT NOT NULL,
 			request_count INTEGER NOT NULL DEFAULT 0,
 			error_count INTEGER NOT NULL DEFAULT 0,
 			total_latency_ms INTEGER NOT NULL DEFAULT 0,
@@ -78,7 +79,7 @@ func (db *DB) migrate() error {
 			last_success_time INTEGER,
 			paused INTEGER NOT NULL DEFAULT 0,
 			pause_until INTEGER,
-			PRIMARY KEY (channel_id, key_name)
+			PRIMARY KEY (channel_id, key_value)
 		)`,
 	}
 
@@ -197,6 +198,106 @@ func (db *DB) Vacuum() error {
 
 	_, err := db.conn.Exec("VACUUM")
 	return err
+}
+
+type KeyStatsRow struct {
+	ChannelID      string
+	KeyName        string
+	KeyValue       string
+	RequestCount   int64
+	ErrorCount     int64
+	TotalLatencyMs int64
+	LastError      string
+	LastErrorTime  int64
+	LastSuccessTime int64
+	Paused         bool
+	PauseUntil     int64
+}
+
+func (db *DB) LoadKeyStats(channelID string) ([]KeyStatsRow, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.conn.Query(
+		`SELECT channel_id, key_name, key_value, request_count, error_count, total_latency_ms,
+		        last_error, last_error_time, last_success_time, paused, pause_until
+		 FROM key_stats WHERE channel_id = ?`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []KeyStatsRow
+	for rows.Next() {
+		var r KeyStatsRow
+		if err := rows.Scan(&r.ChannelID, &r.KeyName, &r.KeyValue, &r.RequestCount, &r.ErrorCount,
+			&r.TotalLatencyMs, &r.LastError, &r.LastErrorTime, &r.LastSuccessTime, &r.Paused, &r.PauseUntil); err != nil {
+			continue
+		}
+		result = append(result, r)
+	}
+	return result, nil
+}
+
+func (db *DB) UpsertKeyStats(row KeyStatsRow) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		`INSERT INTO key_stats (channel_id, key_name, key_value, request_count, error_count, total_latency_ms,
+		        last_error, last_error_time, last_success_time, paused, pause_until)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(channel_id, key_value) DO UPDATE SET
+		        key_name = excluded.key_name,
+		        request_count = excluded.request_count,
+		        error_count = excluded.error_count,
+		        total_latency_ms = excluded.total_latency_ms,
+		        last_error = excluded.last_error,
+		        last_error_time = excluded.last_error_time,
+		        last_success_time = excluded.last_success_time,
+		        paused = excluded.paused,
+		        pause_until = excluded.pause_until`,
+		row.ChannelID, row.KeyName, row.KeyValue, row.RequestCount, row.ErrorCount,
+		row.TotalLatencyMs, row.LastError, row.LastErrorTime, row.LastSuccessTime, row.Paused, row.PauseUntil)
+	return err
+}
+
+func (db *DB) SaveKeyStatsBatch(rows []KeyStatsRow) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO key_stats (channel_id, key_name, key_value, request_count, error_count, total_latency_ms,
+		        last_error, last_error_time, last_success_time, paused, pause_until)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(channel_id, key_value) DO UPDATE SET
+		        key_name = excluded.key_name,
+		        request_count = excluded.request_count,
+		        error_count = excluded.error_count,
+		        total_latency_ms = excluded.total_latency_ms,
+		        last_error = excluded.last_error,
+		        last_error_time = excluded.last_error_time,
+		        last_success_time = excluded.last_success_time,
+		        paused = excluded.paused,
+		        pause_until = excluded.pause_until`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, r := range rows {
+		if _, err := stmt.Exec(r.ChannelID, r.KeyName, r.KeyValue, r.RequestCount, r.ErrorCount,
+			r.TotalLatencyMs, r.LastError, r.LastErrorTime, r.LastSuccessTime, r.Paused, r.PauseUntil); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func maskKey(key string) string {

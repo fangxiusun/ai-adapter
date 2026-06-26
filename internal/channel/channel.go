@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/config"
+	"github.com/fangxiusun/ai-adapter/internal/db"
 	"github.com/fangxiusun/ai-adapter/internal/log"
 )
 
@@ -23,6 +24,7 @@ type ChannelManager struct {
 	defaultID  string
 	logger     *log.Logger
 	mu         sync.RWMutex
+	database   *db.DB
 }
 
 type ModelInfo struct {
@@ -35,22 +37,23 @@ type ModelInfo struct {
 	Aliases           []string
 }
 
-func NewChannelManager(cfgs []config.ChannelConfig, logger *log.Logger) *ChannelManager {
+func NewChannelManager(cfgs []config.ChannelConfig, logger *log.Logger, database *db.DB) *ChannelManager {
 	cm := &ChannelManager{
 		channels: make(map[string]*Channel),
 		logger:   logger,
+		database: database,
 	}
 	for i, cfg := range cfgs {
 		if i == 0 {
 			cm.defaultID = cfg.ID
 		}
-		ch := newChannel(cfg, logger)
+		ch := newChannel(cfg, logger, database)
 		cm.channels[cfg.ID] = ch
 	}
 	return cm
 }
 
-func newChannel(cfg config.ChannelConfig, logger *log.Logger) *Channel {
+func newChannel(cfg config.ChannelConfig, logger *log.Logger, database *db.DB) *Channel {
 	models := make(map[string]config.ModelConfig)
 	for _, m := range cfg.Models {
 		models[m.ID] = m
@@ -60,7 +63,7 @@ func newChannel(cfg config.ChannelConfig, logger *log.Logger) *Channel {
 	}
 	return &Channel{
 		Config:  cfg,
-		keyPool: NewKeyPool(cfg.Keys, cfg.KeyStrategy, cfg.ID, logger, cfg.Retry.ConsecErrorThreshold, cfg.Retry.PauseMultiplierSec, cfg.Retry.PauseMaxSec),
+		keyPool: NewKeyPool(cfg.Keys, cfg.KeyStrategy, cfg.ID, logger, cfg.Retry.ConsecErrorThreshold, cfg.Retry.PauseMultiplierSec, cfg.Retry.PauseMaxSec, database, time.Duration(cfg.KeyStatsSyncSec)*time.Second),
 		models:  models,
 		httpClient: &http.Client{
 			Timeout: time.Duration(cfg.RequestTimeoutMs) * time.Millisecond,
@@ -96,6 +99,15 @@ func (cm *ChannelManager) GetChannel(id string) (*Channel, bool) {
 	defer cm.mu.RUnlock()
 	ch, ok := cm.channels[id]
 	return ch, ok
+}
+
+func (cm *ChannelManager) Stop() {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	for _, ch := range cm.channels {
+		ch.keyPool.Stop()
+		ch.keyPool.SaveToDB()
+	}
 }
 
 func (cm *ChannelManager) ListChannels() []*Channel {

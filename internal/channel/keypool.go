@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/config"
+	"github.com/fangxiusun/ai-adapter/internal/db"
 	"github.com/fangxiusun/ai-adapter/internal/log"
 )
 
@@ -18,15 +19,18 @@ type KeyEntry struct {
 }
 
 type KeyPool struct {
-	keys       []*KeyEntry
-	strategy   string
-	channelID  string
-	counter    uint64
-	logger     *log.Logger
-	mu         sync.RWMutex
+	keys         []*KeyEntry
+	strategy     string
+	channelID    string
+	counter      uint64
+	logger       *log.Logger
+	mu           sync.RWMutex
+	database     *db.DB
+	syncInterval time.Duration
+	stopCh       chan struct{}
 }
 
-func NewKeyPool(keyCfgs []config.KeyConfig, strategy, channelID string, logger *log.Logger, consecThreshold, pauseMultiplierSec, pauseMaxSec int) *KeyPool {
+func NewKeyPool(keyCfgs []config.KeyConfig, strategy, channelID string, logger *log.Logger, consecThreshold, pauseMultiplierSec, pauseMaxSec int, database *db.DB, syncInterval time.Duration) *KeyPool {
 	keys := make([]*KeyEntry, len(keyCfgs))
 	for i, kc := range keyCfgs {
 		name := kc.Name
@@ -39,12 +43,20 @@ func NewKeyPool(keyCfgs []config.KeyConfig, strategy, channelID string, logger *
 			State: NewKeyState(consecThreshold, pauseMultiplierSec, pauseMaxSec),
 		}
 	}
-	return &KeyPool{
-		keys:      keys,
-		strategy:  strategy,
-		channelID: channelID,
-		logger:    logger,
+	kp := &KeyPool{
+		keys:         keys,
+		strategy:     strategy,
+		channelID:    channelID,
+		logger:       logger,
+		database:     database,
+		syncInterval: syncInterval,
+		stopCh:       make(chan struct{}),
 	}
+	kp.loadFromDB()
+	if syncInterval > 0 && database != nil {
+		go kp.syncLoop()
+	}
+	return kp
 }
 
 func (kp *KeyPool) Next() *KeyEntry {
@@ -160,6 +172,87 @@ func (kp *KeyPool) leastRateLimited(available []*KeyEntry) *KeyEntry {
 	return sorted[0]
 }
 
+func (kp *KeyPool) loadFromDB() {
+	if kp.database == nil {
+		return
+	}
+	rows, err := kp.database.LoadKeyStats(kp.channelID)
+	if err != nil {
+		kp.logger.Warn("failed to load key stats from db", "channel", kp.channelID, "error", err)
+		return
+	}
+	rowMap := make(map[string]db.KeyStatsRow)
+	for _, r := range rows {
+		rowMap[r.KeyValue] = r
+	}
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	for _, k := range kp.keys {
+		if r, ok := rowMap[k.Value]; ok {
+			k.State.RequestCount = r.RequestCount
+			k.State.ErrorCount = r.ErrorCount
+			k.State.TotalLatencyMs = r.TotalLatencyMs
+			k.State.LastError = r.LastError
+			if r.LastErrorTime > 0 {
+				k.State.LastErrorTime = time.UnixMilli(r.LastErrorTime)
+			}
+			if r.LastSuccessTime > 0 {
+				k.State.LastSuccessTime = time.UnixMilli(r.LastSuccessTime)
+			}
+			k.State.Paused = r.Paused
+			if r.PauseUntil > 0 {
+				k.State.PauseUntil = time.UnixMilli(r.PauseUntil)
+			}
+		}
+	}
+	kp.logger.Info("loaded key stats from db", "channel", kp.channelID, "count", len(rows))
+}
+
+func (kp *KeyPool) SaveToDB() {
+	if kp.database == nil {
+		return
+	}
+	kp.mu.RLock()
+	var rows []db.KeyStatsRow
+	for _, k := range kp.keys {
+		rows = append(rows, db.KeyStatsRow{
+			ChannelID:      kp.channelID,
+			KeyName:        k.Name,
+			KeyValue:       k.Value,
+			RequestCount:   k.State.RequestCount,
+			ErrorCount:     k.State.ErrorCount,
+			TotalLatencyMs: k.State.TotalLatencyMs,
+			LastError:      k.State.LastError,
+			LastErrorTime:  k.State.LastErrorTime.UnixMilli(),
+			LastSuccessTime: k.State.LastSuccessTime.UnixMilli(),
+			Paused:         k.State.Paused,
+			PauseUntil:     k.State.PauseUntil.UnixMilli(),
+		})
+	}
+	kp.mu.RUnlock()
+
+	if err := kp.database.SaveKeyStatsBatch(rows); err != nil {
+		kp.logger.Warn("failed to save key stats", "channel", kp.channelID, "error", err)
+	}
+}
+
+func (kp *KeyPool) syncLoop() {
+	ticker := time.NewTicker(kp.syncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			kp.SaveToDB()
+		case <-kp.stopCh:
+			return
+		}
+	}
+}
+
+func (kp *KeyPool) Stop() {
+	close(kp.stopCh)
+}
+
 func (kp *KeyPool) GetN(n int) []*KeyEntry {
 	kp.mu.RLock()
 	defer kp.mu.RUnlock()
@@ -257,6 +350,7 @@ func (kp *KeyPool) GetStats() []KeyStats {
 	for _, k := range kp.keys {
 		stats = append(stats, KeyStats{
 			Name:               k.Name,
+			Value:              k.Value,
 			RequestCount:       k.State.RequestCount,
 			ErrorCount:         k.State.ErrorCount,
 			AvgLatencyMs:       k.State.AvgLatencyMs(),
@@ -272,11 +366,11 @@ func (kp *KeyPool) GetStats() []KeyStats {
 	return stats
 }
 
-func (kp *KeyPool) PauseKey(keyName string) {
+func (kp *KeyPool) PauseKey(keyValue string) {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
 	for _, k := range kp.keys {
-		if k.Name == keyName {
+		if k.Value == keyValue {
 			k.State.Paused = true
 			k.State.PauseUntil = time.Now().Add(24 * time.Hour)
 			return
@@ -284,11 +378,11 @@ func (kp *KeyPool) PauseKey(keyName string) {
 	}
 }
 
-func (kp *KeyPool) ResumeKey(keyName string) {
+func (kp *KeyPool) ResumeKey(keyValue string) {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
 	for _, k := range kp.keys {
-		if k.Name == keyName {
+		if k.Value == keyValue {
 			k.State.ResetPause()
 			k.State.PermanentlySkipped = false
 			kp.logger.LogKeyResumed(kp.channelID, k.Name)

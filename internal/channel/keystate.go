@@ -160,6 +160,7 @@ func (ks *KeyState) RateLimitScore() int {
 
 type KeyStats struct {
 	Name               string    `json:"name"`
+	Value              string    `json:"value"`
 	RequestCount       int64     `json:"request_count"`
 	ErrorCount         int64     `json:"error_count"`
 	AvgLatencyMs       int64     `json:"avg_latency_ms"`

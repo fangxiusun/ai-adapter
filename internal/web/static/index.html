@@ -173,7 +173,7 @@
                             <tbody>
                                 <template x-for="k in ch.key_stats || []" :key="k.value || k.name">
                                     <tr>
-                                        <td class="mono" x-text="k.name || k.value"></td>
+                                        <td><span class="mono" x-text="k.name || k.value"></span><br><span class="text-muted text-sm" x-text="k.value ? k.value.substring(0,8) + '***' : ''"></span></td>
                                         <td>
                                             <span class="badge" :class="k.paused ? 'badge-red' : 'badge-green'" x-text="k.paused ? '已暂停' : '活跃'"></span>
                                         </td>
@@ -181,7 +181,7 @@
                                         <td :class="(k.error_count || 0) > 0 ? 'text-red' : ''" x-text="k.error_count || 0"></td>
                                         <td>
                                             <button class="btn btn-sm" :class="k.paused ? 'btn-green' : 'btn-red'"
-                                                    @click="toggleKey(ch.id, k.name, k.paused)"
+                                                    @click="toggleKey(ch.id, k.value, k.paused)"
                                                     x-text="k.paused ? '恢复' : '暂停'"></button>
                                         </td>
                                     </tr>
