@@ -191,6 +191,15 @@ func (kp *KeyPool) loadFromDB() {
 		if r, ok := rowMap[k.Value]; ok {
 			k.State.RequestCount = r.RequestCount
 			k.State.ErrorCount = r.ErrorCount
+			k.State.Error400 = r.Error400
+			k.State.Error401 = r.Error401
+			k.State.Error403 = r.Error403
+			k.State.Error404 = r.Error404
+			k.State.Error429 = r.Error429
+			k.State.Error4xx = r.Error4xx
+			k.State.Error5xx = r.Error5xx
+			k.State.ErrorNetwork = r.ErrorNetwork
+			k.State.ErrorStream = r.ErrorStream
 			k.State.TotalLatencyMs = r.TotalLatencyMs
 			k.State.LastError = r.LastError
 			if r.LastErrorTime > 0 {
@@ -221,6 +230,15 @@ func (kp *KeyPool) SaveToDB() {
 			KeyValue:       k.Value,
 			RequestCount:   k.State.RequestCount,
 			ErrorCount:     k.State.ErrorCount,
+			Error400:       k.State.Error400,
+			Error401:       k.State.Error401,
+			Error403:       k.State.Error403,
+			Error404:       k.State.Error404,
+			Error429:       k.State.Error429,
+			Error4xx:       k.State.Error4xx,
+			Error5xx:       k.State.Error5xx,
+			ErrorNetwork:   k.State.ErrorNetwork,
+			ErrorStream:    k.State.ErrorStream,
 			TotalLatencyMs: k.State.TotalLatencyMs,
 			LastError:      k.State.LastError,
 			LastErrorTime:  k.State.LastErrorTime.UnixMilli(),
@@ -317,7 +335,8 @@ func (kp *KeyPool) ReportError(key string, statusCode int) {
 	defer kp.mu.RUnlock()
 	for _, k := range kp.keys {
 		if k.Value == key {
-			if statusCode == 401 {
+			switch {
+			case statusCode == 401:
 				k.State.On401()
 				kp.logger.Warn("key permanently skipped (401)",
 					"channel", kp.channelID,
@@ -325,18 +344,42 @@ func (kp *KeyPool) ReportError(key string, statusCode int) {
 					"key_value", k.Value,
 					"reason", "401 Unauthorized",
 				)
-			} else if statusCode == 429 {
+			case statusCode == 429:
 				k.State.On429()
 				kp.logger.Warn("key rate limited (429)",
 					"channel", kp.channelID,
 					"key_name", k.Name,
 					"rate_limit_count", k.State.RateLimitScore(),
 				)
-			} else {
-				k.State.OnError()
-				if k.State.Paused {
-					kp.logger.LogKeyPaused(kp.channelID, k.Name, k.State.ConsecErrors, k.State.PauseUntil)
-				}
+			case statusCode == 400:
+				k.State.On400()
+			case statusCode == 403:
+				k.State.On403()
+			case statusCode == 404:
+				k.State.On404()
+			case statusCode >= 400 && statusCode < 500:
+				k.State.OnError4xx()
+			case statusCode >= 500:
+				k.State.OnError5xx(statusCode)
+			default:
+				k.State.OnErrorNetwork()
+			}
+			if k.State.Paused {
+				kp.logger.LogKeyPaused(kp.channelID, k.Name, k.State.ConsecErrors, k.State.PauseUntil)
+			}
+			return
+		}
+	}
+}
+
+func (kp *KeyPool) ReportStreamError(key string) {
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+	for _, k := range kp.keys {
+		if k.Value == key {
+			k.State.OnErrorStream()
+			if k.State.Paused {
+				kp.logger.LogKeyPaused(kp.channelID, k.Name, k.State.ConsecErrors, k.State.PauseUntil)
 			}
 			return
 		}
@@ -353,6 +396,15 @@ func (kp *KeyPool) GetStats() []KeyStats {
 			Value:              k.Value,
 			RequestCount:       k.State.RequestCount,
 			ErrorCount:         k.State.ErrorCount,
+			Error400:           k.State.Error400,
+			Error401:           k.State.Error401,
+			Error403:           k.State.Error403,
+			Error404:           k.State.Error404,
+			Error429:           k.State.Error429,
+			Error4xx:           k.State.Error4xx,
+			Error5xx:           k.State.Error5xx,
+			ErrorNetwork:       k.State.ErrorNetwork,
+			ErrorStream:        k.State.ErrorStream,
 			AvgLatencyMs:       k.State.AvgLatencyMs(),
 			LastSuccessTime:    k.State.LastSuccessTime,
 			LastErrorTime:      k.State.LastErrorTime,

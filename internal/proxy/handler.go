@@ -671,7 +671,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		chatResp, err := h.accumulateStreamToChat(r.Context(), source, resp.Body, chatReq)
 		resp.Body.Close()
 		if err != nil {
-			ch.ReportError(key.Value, 0)
+			ch.ReportStreamError(key.Value)
 			rs.excluded[key.Value] = true
 			continue
 		}

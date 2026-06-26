@@ -7,7 +7,16 @@ import (
 
 type KeyState struct {
 	RequestCount       int64
-	ErrorCount         int64
+	ErrorCount         int64 // sum of all errors, kept for backward compat
+	Error400           int64
+	Error401           int64
+	Error403           int64
+	Error404           int64
+	Error429           int64
+	Error4xx           int64 // other 4xx
+	Error5xx           int64
+	ErrorNetwork       int64
+	ErrorStream        int64
 	ConsecErrors       int
 	TotalLatencyMs     int64
 	LastError          string
@@ -66,19 +75,33 @@ func (ks *KeyState) OnSuccess() {
 	ks.LastSuccessTime = time.Now()
 }
 
+func (ks *KeyState) On400() {
+	ks.recordError(&ks.Error400, "400 Bad Request")
+}
+
 func (ks *KeyState) On401() {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	ks.PermanentlySkipped = true
+	ks.Error401++
+	ks.ErrorCount++
 	ks.LastError = "401 Unauthorized - permanently skipped"
 	ks.LastErrorTime = time.Now()
-	ks.ErrorCount++
+}
+
+func (ks *KeyState) On403() {
+	ks.recordError(&ks.Error403, "403 Forbidden")
+}
+
+func (ks *KeyState) On404() {
+	ks.recordError(&ks.Error404, "404 Not Found")
 }
 
 func (ks *KeyState) On429() {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	ks.RequestCount++
+	ks.Error429++
 	ks.ErrorCount++
 	ks.RateLimitCount++
 	ks.LastError = "429 Rate Limited"
@@ -109,12 +132,31 @@ func (ks *KeyState) On429() {
 	ks.ConsecErrors++
 }
 
-func (ks *KeyState) OnError() {
+func (ks *KeyState) OnError4xx() {
+	ks.recordError(&ks.Error4xx, "4xx Client Error")
+}
+
+func (ks *KeyState) OnError5xx(statusCode int) {
+	ks.recordError(&ks.Error5xx, "5xx Server Error")
+}
+
+func (ks *KeyState) OnErrorNetwork() {
+	ks.recordError(&ks.ErrorNetwork, "Network Error")
+}
+
+func (ks *KeyState) OnErrorStream() {
+	ks.recordError(&ks.ErrorStream, "Stream Parse Error")
+}
+
+// recordError is the common error recording logic.
+func (ks *KeyState) recordError(counter *int64, msg string) {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	ks.RequestCount++
+	*counter++
 	ks.ErrorCount++
 	ks.ConsecErrors++
+	ks.LastError = msg
 	ks.LastErrorTime = time.Now()
 
 	if ks.ConsecErrors >= ks.consecThreshold {
@@ -163,6 +205,15 @@ type KeyStats struct {
 	Value              string    `json:"value"`
 	RequestCount       int64     `json:"request_count"`
 	ErrorCount         int64     `json:"error_count"`
+	Error400           int64     `json:"error_400"`
+	Error401           int64     `json:"error_401"`
+	Error403           int64     `json:"error_403"`
+	Error404           int64     `json:"error_404"`
+	Error429           int64     `json:"error_429"`
+	Error4xx           int64     `json:"error_4xx"`
+	Error5xx           int64     `json:"error_5xx"`
+	ErrorNetwork       int64     `json:"error_network"`
+	ErrorStream        int64     `json:"error_stream"`
 	AvgLatencyMs       int64     `json:"avg_latency_ms"`
 	LastSuccessTime    time.Time `json:"last_success_time"`
 	LastErrorTime      time.Time `json:"last_error_time"`

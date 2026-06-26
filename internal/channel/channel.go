@@ -162,6 +162,10 @@ func (ch *Channel) ReportError(key string, statusCode int) {
 	ch.keyPool.ReportError(key, statusCode)
 }
 
+func (ch *Channel) ReportStreamError(key string) {
+	ch.keyPool.ReportStreamError(key)
+}
+
 func (ch *Channel) HTTPClient() *http.Client {
 	return ch.httpClient
 }

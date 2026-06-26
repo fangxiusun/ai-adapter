@@ -165,8 +165,17 @@
                                 <tr>
                                     <th>名称</th>
                                     <th>状态</th>
-                                    <th>请求数</th>
-                                    <th>错误数</th>
+                                    <th>请求</th>
+                                    <th>错误</th>
+                                    <th>400</th>
+                                    <th>401</th>
+                                    <th>403</th>
+                                    <th>404</th>
+                                    <th>429</th>
+                                    <th>4xx</th>
+                                    <th>5xx</th>
+                                    <th>网络</th>
+                                    <th>流式</th>
                                     <th>操作</th>
                                 </tr>
                             </thead>
@@ -179,6 +188,15 @@
                                         </td>
                                         <td x-text="k.request_count || 0"></td>
                                         <td :class="(k.error_count || 0) > 0 ? 'text-red' : ''" x-text="k.error_count || 0"></td>
+                                        <td :class="(k.error_400 || 0) > 0 ? 'text-yellow' : ''" x-text="k.error_400 || '-'"></td>
+                                        <td :class="(k.error_401 || 0) > 0 ? 'text-red' : ''" x-text="k.error_401 || '-'"></td>
+                                        <td :class="(k.error_403 || 0) > 0 ? 'text-yellow' : ''" x-text="k.error_403 || '-'"></td>
+                                        <td :class="(k.error_404 || 0) > 0 ? 'text-yellow' : ''" x-text="k.error_404 || '-'"></td>
+                                        <td :class="(k.error_429 || 0) > 0 ? 'text-yellow' : ''" x-text="k.error_429 || '-'"></td>
+                                        <td :class="(k.error_4xx || 0) > 0 ? 'text-yellow' : ''" x-text="k.error_4xx || '-'"></td>
+                                        <td :class="(k.error_5xx || 0) > 0 ? 'text-red' : ''" x-text="k.error_5xx || '-'"></td>
+                                        <td :class="(k.error_network || 0) > 0 ? 'text-red' : ''" x-text="k.error_network || '-'"></td>
+                                        <td :class="(k.error_stream || 0) > 0 ? 'text-red' : ''" x-text="k.error_stream || '-'"></td>
                                         <td>
                                             <button class="btn btn-sm" :class="k.paused ? 'btn-green' : 'btn-red'"
                                                     @click="toggleKey(ch.id, k.value, k.paused)"
