@@ -165,22 +165,22 @@
                                 <tr>
                                     <th>名称</th>
                                     <th>状态</th>
-                                    <th>请求</th>
-                                    <th>错误</th>
-                                    <th>400</th>
-                                    <th>401</th>
-                                    <th>403</th>
-                                    <th>404</th>
-                                    <th>429</th>
-                                    <th>4xx</th>
-                                    <th>5xx</th>
-                                    <th>网络</th>
-                                    <th>流式</th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'request_count')">请求 <span x-text="sortKey === ch.id+':request_count' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_count')">错误 <span x-text="sortKey === ch.id+':error_count' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_400')">400 <span x-text="sortKey === ch.id+':error_400' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_401')">401 <span x-text="sortKey === ch.id+':error_401' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_403')">403 <span x-text="sortKey === ch.id+':error_403' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_404')">404 <span x-text="sortKey === ch.id+':error_404' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_429')">429 <span x-text="sortKey === ch.id+':error_429' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_4xx')">4xx <span x-text="sortKey === ch.id+':error_4xx' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_5xx')">5xx <span x-text="sortKey === ch.id+':error_5xx' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_network')">网络 <span x-text="sortKey === ch.id+':error_network' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
+                                    <th class="sortable" @click="sortKeys(ch.id, 'error_stream')">流式 <span x-text="sortKey === ch.id+':error_stream' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
                                     <th>操作</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <template x-for="k in ch.key_stats || []" :key="k.value || k.name">
+                                <template x-for="k in sortedKeyStats(ch.id, ch.key_stats) || []" :key="k.value || k.name">
                                     <tr>
                                         <td><span class="mono" x-text="k.name || k.value"></span><br><span class="text-muted text-sm" x-text="k.value ? k.value.substring(0,8) + '***' : ''"></span></td>
                                         <td>
@@ -313,6 +313,8 @@
             logs: [],
             configData: {},
             logFilter: { channel: '', status: '', limit: 50 },
+            sortKey: '',
+            sortDir: 'asc',
 
             get totalKeys() {
                 let n = 0;
@@ -363,6 +365,29 @@
                     const r = await fetch('/admin/api/config');
                     if (r.ok) this.configData = await r.json();
                 } catch {}
+            },
+
+            sortKeys(channelId, key) {
+                if (this.sortKey === channelId + ':' + key) {
+                    this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+                } else {
+                    this.sortKey = channelId + ':' + key;
+                    this.sortDir = 'asc';
+                }
+            },
+
+            sortedKeyStats(channelId, stats) {
+                if (!stats || !stats.length) return [];
+                const sk = channelId + ':' + this.sortKey.split(':')[1];
+                const sortField = this.sortKey.split(':')[1];
+                if (!sortField || this.sortKey.split(':')[0] !== channelId) return stats;
+                const sorted = [...stats].sort((a, b) => {
+                    const va = a[sortField] ?? 0;
+                    const vb = b[sortField] ?? 0;
+                    if (typeof va === 'number' && typeof vb === 'number') return this.sortDir === 'asc' ? va - vb : vb - va;
+                    return this.sortDir === 'asc' ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+                });
+                return sorted;
             },
 
             async toggleKey(channelId, keyVal, paused) {

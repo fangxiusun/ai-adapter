@@ -16,22 +16,22 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	APIToken string `yaml:"api_token"`
+	Host     string `yaml:"host" json:"host"`
+	Port     int    `yaml:"port" json:"port"`
+	APIToken string `yaml:"api_token" json:"api_token"`
 }
 
 type LoggingConfig struct {
-	Level          string `yaml:"level"`
-	File           string `yaml:"file"`
-	MaxSizeMB      int    `yaml:"max_size_mb"`
-	MaxBackups     int    `yaml:"max_backups"`
-	LogRequestBody bool   `yaml:"log_request_body"`
-	LogIO          bool   `yaml:"log_io"`
+	Level          string `yaml:"level" json:"level"`
+	File           string `yaml:"file" json:"file"`
+	MaxSizeMB      int    `yaml:"max_size_mb" json:"max_size_mb"`
+	MaxBackups     int    `yaml:"max_backups" json:"max_backups"`
+	LogRequestBody bool   `yaml:"log_request_body" json:"log_request_body"`
+	LogIO          bool   `yaml:"log_io" json:"log_io"`
 }
 
 type DatabaseConfig struct {
-	Path string `yaml:"path"`
+	Path string `yaml:"path" json:"path"`
 }
 
 // ChannelConfig defines a channel with interface capability URLs.
