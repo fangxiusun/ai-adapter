@@ -36,3 +36,5 @@ server
 
 dist/
 tools/logs
+.gomodcache/
+tools/keys.txt
