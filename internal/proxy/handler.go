@@ -355,6 +355,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			w.Write(respBody)
 		}
 		resp.Body.Close()
+		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
 		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "")
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
@@ -447,6 +448,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 			return
 		}
 
+		ch.RecordLatency(key.Value, latency)
 		ch.ReportSuccess(key.Value)
 		result = &UpstreamResult{Body: respBody, StatusCode: resp.StatusCode, Key: key, LatencyMs: latency}
 		break
@@ -578,6 +580,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			translate.PipeChatStreamToGemini(r.Context(), resp.Body, w, chatReq, flusher)
 		}
 		resp.Body.Close()
+		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
 		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "")
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
@@ -672,6 +675,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			rs.excluded[key.Value] = true
 			continue
 		}
+		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)

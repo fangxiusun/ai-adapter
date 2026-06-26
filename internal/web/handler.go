@@ -176,11 +176,16 @@ func (h *WebHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 	for _, ch := range channels {
 		stats := ch.KeyPool().GetStats()
 		channelStats = append(channelStats, map[string]interface{}{
-			"id":         ch.Config.ID,
-			"name":       ch.Config.Name,
-			"enabled":    ch.Config.Enabled,
-			"key_count":  len(ch.Config.Keys),
-			"key_stats":  stats,
+			"id":                   ch.Config.ID,
+			"name":                 ch.Config.Name,
+			"enabled":              ch.Config.Enabled,
+			"chat_url":             ch.Config.ChatURL,
+			"responses_url":        ch.Config.ResponsesURL,
+			"messages_url":         ch.Config.MessagesURL,
+			"generate_content_url": ch.Config.GenerateContentURL,
+			"default_model":        ch.Config.DefaultModel,
+			"key_count":            len(ch.Config.Keys),
+			"key_stats":            stats,
 		})
 	}
 	h.json(w, 200, map[string]interface{}{

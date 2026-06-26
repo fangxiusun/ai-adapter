@@ -159,15 +159,15 @@ func (ks *KeyState) RateLimitScore() int {
 }
 
 type KeyStats struct {
-	Name               string
-	RequestCount       int64
-	ErrorCount         int64
-	AvgLatencyMs       int64
-	LastSuccessTime    time.Time
-	LastErrorTime      time.Time
-	LastError          string
-	Paused             bool
-	PauseUntil         time.Time
-	PermanentlySkipped bool
-	RateLimitCount     int
+	Name               string    `json:"name"`
+	RequestCount       int64     `json:"request_count"`
+	ErrorCount         int64     `json:"error_count"`
+	AvgLatencyMs       int64     `json:"avg_latency_ms"`
+	LastSuccessTime    time.Time `json:"last_success_time"`
+	LastErrorTime      time.Time `json:"last_error_time"`
+	LastError          string    `json:"last_error"`
+	Paused             bool      `json:"paused"`
+	PauseUntil         time.Time `json:"pause_until"`
+	PermanentlySkipped bool      `json:"permanently_skipped"`
+	RateLimitCount     int       `json:"rate_limit_count"`
 }

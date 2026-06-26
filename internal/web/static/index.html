@@ -1,88 +1,375 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ai-adapter - LLM API 代理</title>
+    <title>ai-adapter - LLM API Proxy</title>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/style.css">
 </head>
-<body>
-    <div x-data="app()" x-init="init()">
-        <nav class="navbar">
-            <div class="nav-brand">ai-adapter</div>
-            <div class="nav-links">
-                <a href="/" :class="{'active': page === 'dashboard'}">仪表盘</a>
-                <a href="/channels.html" :class="{'active': page === 'channels'}">渠道</a>
-                <a href="/keys.html" :class="{'active': page === 'keys'}">Keys</a>
-                <a href="/logs.html" :class="{'active': page === 'logs'}">日志</a>
-                <a href="/settings.html" :class="{'active': page === 'settings'}">设置</a>
-            </div>
-        </nav>
+<body x-data="app()" x-init="init()">
+    <nav class="sidebar">
+        <div class="sidebar-brand">
+            <span class="brand-icon">⚡</span>
+            <span class="brand-text">ai-adapter</span>
+        </div>
+        <div class="sidebar-nav">
+            <a :class="{'active': page === 'dashboard'}" @click.prevent="page='dashboard'" href="#">
+                <span class="nav-icon">📊</span><span>仪表盘</span>
+            </a>
+            <a :class="{'active': page === 'channels'}" @click.prevent="page='channels'; loadChannels()" href="#">
+                <span class="nav-icon">🔌</span><span>渠道</span>
+            </a>
+            <a :class="{'active': page === 'keys'}" @click.prevent="page='keys'; loadChannels()" href="#">
+                <span class="nav-icon">🔑</span><span>Keys</span>
+            </a>
+            <a :class="{'active': page === 'logs'}" @click.prevent="page='logs'; loadLogs()" href="#">
+                <span class="nav-icon">📋</span><span>日志</span>
+            </a>
+            <a :class="{'active': page === 'settings'}" @click.prevent="page='settings'; loadConfig()" href="#">
+                <span class="nav-icon">⚙️</span><span>设置</span>
+            </a>
+        </div>
+        <div class="sidebar-footer">
+            <div class="health-dot" :class="healthy ? 'dot-green' : 'dot-red'"></div>
+            <span x-text="healthy ? '运行中' : '离线'"></span>
+        </div>
+    </nav>
 
-        <div class="container">
-            <h1>仪表盘</h1>
+    <main class="main">
+        <!-- ========== Dashboard ========== -->
+        <div x-show="page === 'dashboard'" x-cloak>
+            <div class="page-header">
+                <h1>仪表盘</h1>
+                <button class="btn btn-ghost" @click="fetchStats()">🔄 刷新</button>
+            </div>
 
             <div class="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-label">渠道数</div>
-                    <div class="stat-value" x-text="stats.channels?.length || 0"></div>
+                    <div class="stat-icon">🔌</div>
+                    <div class="stat-body">
+                        <div class="stat-value" x-text="stats.channels?.length || 0"></div>
+                        <div class="stat-label">渠道</div>
+                    </div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">日志总数</div>
-                    <div class="stat-value" x-text="stats.log_count || 0"></div>
+                    <div class="stat-icon">🔑</div>
+                    <div class="stat-body">
+                        <div class="stat-value" x-text="totalKeys"></div>
+                        <div class="stat-label">Keys</div>
+                    </div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">健康状态</div>
-                    <div class="stat-value text-green">正常</div>
+                    <div class="stat-icon">📋</div>
+                    <div class="stat-body">
+                        <div class="stat-value" x-text="stats.log_count || 0"></div>
+                        <div class="stat-label">请求总数</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon" x-text="healthy ? '✅' : '❌'"></div>
+                    <div class="stat-body">
+                        <div class="stat-value" :class="healthy ? 'text-green' : 'text-red'" x-text="healthy ? '正常' : '异常'"></div>
+                        <div class="stat-label">健康状态</div>
+                    </div>
                 </div>
             </div>
 
-            <h2>渠道状态</h2>
-            <div class="channel-grid">
+            <h2>渠道概览</h2>
+            <div class="card-grid">
                 <template x-for="ch in stats.channels || []" :key="ch.id">
-                    <div class="channel-card">
-                        <div class="channel-header">
-                            <span class="channel-name" x-text="ch.name"></span>
-                            <span class="badge" :class="ch.enabled ? 'badge-green' : 'badge-red'"
-                                  x-text="ch.enabled ? '启用' : '禁用'"></span>
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title" x-text="ch.name"></span>
+                            <span class="badge" :class="ch.enabled ? 'badge-green' : 'badge-red'" x-text="ch.enabled ? '启用' : '禁用'"></span>
                         </div>
-                        <div class="channel-info">
-                            <div>Chat: <span x-text="ch.chat_url ? '✓' : '✗'"></span> | Responses: <span x-text="ch.responses_url ? '✓' : '✗'"></span> | Messages: <span x-text="ch.messages_url ? '✓' : '✗'"></span> | Gemini: <span x-text="ch.generate_content_url ? '✓' : '✗'"></span></div>
-                            <div>Key 数: <span x-text="ch.key_count"></span></div>
-                        </div>
-                        <div class="channel-keys">
-                            <template x-for="k in ch.key_stats || []" :key="k.name">
-                                <div class="key-row">
-                                    <span class="key-name" x-text="k.name"></span>
-                                    <span class="badge" :class="k.paused ? 'badge-red' : 'badge-green'"
-                                          x-text="k.paused ? '暂停' : '活跃'"></span>
-                                    <span class="key-stat">请求: <span x-text="k.request_count"></span></span>
-                                    <span class="key-stat">错误: <span x-text="k.error_count"></span></span>
-                                </div>
-                            </template>
+                        <div class="card-body">
+                            <div class="info-row"><span class="info-key">ID</span><span class="mono" x-text="ch.id"></span></div>
+                            <div class="info-row"><span class="info-key">Keys</span><span x-text="ch.key_count"></span></div>
+                            <div class="capability-row">
+                                <span class="cap" :class="ch.chat_url ? 'cap-on' : 'cap-off'">Chat</span>
+                                <span class="cap" :class="ch.responses_url ? 'cap-on' : 'cap-off'">Responses</span>
+                                <span class="cap" :class="ch.messages_url ? 'cap-on' : 'cap-off'">Messages</span>
+                                <span class="cap" :class="ch.generate_content_url ? 'cap-on' : 'cap-off'">Gemini</span>
+                            </div>
                         </div>
                     </div>
                 </template>
             </div>
         </div>
-    </div>
+
+        <!-- ========== Channels ========== -->
+        <div x-show="page === 'channels'" x-cloak>
+            <div class="page-header">
+                <h1>渠道管理</h1>
+                <button class="btn btn-ghost" @click="loadChannels()">🔄 刷新</button>
+            </div>
+
+            <template x-for="ch in channelsData" :key="ch.id">
+                <div class="card card-full">
+                    <div class="card-header">
+                        <span class="card-title" x-text="ch.name"></span>
+                        <div class="badge-group">
+                            <span class="badge" :class="ch.enabled ? 'badge-green' : 'badge-red'" x-text="ch.enabled ? '启用' : '禁用'"></span>
+                            <span class="badge badge-blue" x-text="ch.default_model"></span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="url-grid">
+                            <div class="url-item">
+                                <span class="url-label">Chat</span>
+                                <span class="url-value" :class="ch.chat_url ? '' : 'text-muted'" x-text="ch.chat_url || '未配置'"></span>
+                            </div>
+                            <div class="url-item">
+                                <span class="url-label">Responses</span>
+                                <span class="url-value" :class="ch.responses_url ? '' : 'text-muted'" x-text="ch.responses_url || '未配置'"></span>
+                            </div>
+                            <div class="url-item">
+                                <span class="url-label">Messages</span>
+                                <span class="url-value" :class="ch.messages_url ? '' : 'text-muted'" x-text="ch.messages_url || '未配置'"></span>
+                            </div>
+                            <div class="url-item">
+                                <span class="url-label">Gemini</span>
+                                <span class="url-value" :class="ch.generate_content_url ? '' : 'text-muted'" x-text="ch.generate_content_url || '未配置'"></span>
+                            </div>
+                        </div>
+                        <div class="models-section" x-show="ch.models && ch.models.length > 0">
+                            <h3>模型</h3>
+                            <div class="model-tags">
+                                <template x-for="m in ch.models || []" :key="m.id">
+                                    <span class="tag" x-text="m.display_name || m.id" :title="m.id"></span>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- ========== Keys ========== -->
+        <div x-show="page === 'keys'" x-cloak>
+            <div class="page-header">
+                <h1>Key 管理</h1>
+                <button class="btn btn-ghost" @click="loadChannels()">🔄 刷新</button>
+            </div>
+
+            <template x-for="ch in channelsData" :key="ch.id">
+                <div class="card card-full">
+                    <div class="card-header">
+                        <span class="card-title" x-text="ch.name + ' (' + ch.id + ')'"></span>
+                        <span class="badge badge-blue" x-text="(ch.key_stats?.length || 0) + ' 个 Key'"></span>
+                    </div>
+                    <div class="card-body no-padding">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>名称</th>
+                                    <th>状态</th>
+                                    <th>请求数</th>
+                                    <th>错误数</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="k in ch.key_stats || []" :key="k.value || k.name">
+                                    <tr>
+                                        <td class="mono" x-text="k.name || k.value"></td>
+                                        <td>
+                                            <span class="badge" :class="k.paused ? 'badge-red' : 'badge-green'" x-text="k.paused ? '已暂停' : '活跃'"></span>
+                                        </td>
+                                        <td x-text="k.request_count || 0"></td>
+                                        <td :class="(k.error_count || 0) > 0 ? 'text-red' : ''" x-text="k.error_count || 0"></td>
+                                        <td>
+                                            <button class="btn btn-sm" :class="k.paused ? 'btn-green' : 'btn-red'"
+                                                    @click="toggleKey(ch.id, k.name, k.paused)"
+                                                    x-text="k.paused ? '恢复' : '暂停'"></button>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </template>
+        </div>
+
+        <!-- ========== Logs ========== -->
+        <div x-show="page === 'logs'" x-cloak>
+            <div class="page-header">
+                <h1>请求日志</h1>
+                <button class="btn btn-ghost" @click="loadLogs()">🔄 刷新</button>
+            </div>
+
+            <div class="filter-bar">
+                <select x-model="logFilter.channel" @change="loadLogs()">
+                    <option value="">所有渠道</option>
+                    <template x-for="ch in channelsData" :key="ch.id">
+                        <option :value="ch.id" x-text="ch.name"></option>
+                    </template>
+                </select>
+                <select x-model="logFilter.status" @change="loadLogs()">
+                    <option value="">所有状态</option>
+                    <option value="2xx">2xx 成功</option>
+                    <option value="4xx">4xx 客户端错误</option>
+                    <option value="5xx">5xx 服务端错误</option>
+                </select>
+                <input type="number" x-model.number="logFilter.limit" placeholder="数量" min="1" max="500" style="width:80px" @change="loadLogs()">
+                <button class="btn btn-primary" @click="loadLogs()">查询</button>
+            </div>
+
+            <div class="card card-full">
+                <div class="card-body no-padding">
+                    <table class="table table-logs">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>请求 ID</th>
+                                <th>渠道</th>
+                                <th>客户端模型</th>
+                                <th>上游模型</th>
+                                <th>状态</th>
+                                <th>延迟</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="log in logs" :key="log.request_id">
+                                <tr>
+                                    <td class="mono text-sm" x-text="fmtTime(log.timestamp)"></td>
+                                    <td class="mono text-sm" x-text="log.request_id"></td>
+                                    <td x-text="log.channel_id"></td>
+                                    <td class="mono text-sm" x-text="log.model"></td>
+                                    <td>
+                                        <span class="badge" :class="statusBadgeClass(log.status_code)" x-text="log.status_code"></span>
+                                    </td>
+                                    <td x-text="(log.latency_ms || 0) + 'ms'"></td>
+                                </tr>
+                            </template>
+                            <tr x-show="logs.length === 0">
+                                <td colspan="6" class="text-center text-muted">暂无日志</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ========== Settings ========== -->
+        <div x-show="page === 'settings'" x-cloak>
+            <div class="page-header">
+                <h1>设置</h1>
+                <button class="btn btn-ghost" @click="loadConfig()">🔄 刷新</button>
+            </div>
+
+            <div class="card card-full">
+                <div class="card-header"><span class="card-title">服务器配置</span></div>
+                <div class="card-body">
+                    <div class="info-row"><span class="info-key">监听地址</span><span class="mono" x-text="configData.server?.host + ':' + configData.server?.port"></span></div>
+                    <div class="info-row"><span class="info-key">API Token</span><span x-text="configData.server?.api_token ? '已设置' : '未设置（无认证）'"></span></div>
+                </div>
+            </div>
+            <div class="card card-full">
+                <div class="card-header"><span class="card-title">日志配置</span></div>
+                <div class="card-body">
+                    <div class="info-row"><span class="info-key">级别</span><span class="mono" x-text="configData.logging?.level"></span></div>
+                    <div class="info-row"><span class="info-key">文件</span><span class="mono" x-text="configData.logging?.file || 'stdout'"></span></div>
+                    <div class="info-row"><span class="info-key">记录请求体</span><span x-text="configData.logging?.log_request_body ? '是' : '否'"></span></div>
+                    <div class="info-row"><span class="info-key">记录 IO</span><span x-text="configData.logging?.log_io ? '是' : '否'"></span></div>
+                </div>
+            </div>
+            <div class="card card-full">
+                <div class="card-header"><span class="card-title">渠道数</span></div>
+                <div class="card-body">
+                    <div class="info-row"><span class="info-key">已配置渠道</span><span x-text="configData.channels || 0"></span></div>
+                </div>
+            </div>
+        </div>
+    </main>
 
     <script>
     function app() {
         return {
             page: 'dashboard',
+            healthy: false,
             stats: {},
+            channelsData: [],
+            logs: [],
+            configData: {},
+            logFilter: { channel: '', status: '', limit: 50 },
+
+            get totalKeys() {
+                let n = 0;
+                for (const ch of this.stats.channels || []) n += ch.key_count || 0;
+                return n;
+            },
+
             async init() {
                 await this.fetchStats();
+                this.healthy = true;
             },
+
             async fetchStats() {
                 try {
-                    const res = await fetch('/admin/api/stats');
-                    this.stats = await res.json();
-                } catch (e) {
-                    console.error('Failed to fetch stats:', e);
-                }
+                    const r = await fetch('/admin/api/stats');
+                    if (r.ok) { this.stats = await r.json(); this.healthy = true; }
+                    else this.healthy = false;
+                } catch { this.healthy = false; }
+            },
+
+            async loadChannels() {
+                try {
+                    const r = await fetch('/admin/api/channels');
+                    if (r.ok) {
+                        const d = await r.json();
+                        this.channelsData = d.channels || [];
+                    }
+                } catch {}
+            },
+
+            async loadLogs() {
+                try {
+                    let url = '/admin/api/logs?limit=' + (this.logFilter.limit || 50);
+                    if (this.logFilter.channel) url += '&channel=' + this.logFilter.channel;
+                    if (this.logFilter.status === '2xx') { url += '&statusMin=200&statusMax=299'; }
+                    else if (this.logFilter.status === '4xx') { url += '&statusMin=400&statusMax=499'; }
+                    else if (this.logFilter.status === '5xx') { url += '&statusMin=500&statusMax=599'; }
+                    const r = await fetch(url);
+                    if (r.ok) {
+                        const d = await r.json();
+                        this.logs = d.logs || [];
+                    }
+                } catch {}
+            },
+
+            async loadConfig() {
+                try {
+                    const r = await fetch('/admin/api/config');
+                    if (r.ok) this.configData = await r.json();
+                } catch {}
+            },
+
+            async toggleKey(channelId, keyVal, paused) {
+                try {
+                    const action = paused ? 'resume' : 'pause';
+                    await fetch('/admin/api/channels/' + channelId + '/keys', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action, key: keyVal })
+                    });
+                    await this.loadChannels();
+                } catch {}
+            },
+
+            fmtTime(ts) {
+                if (!ts) return '-';
+                const d = new Date(ts < 1e12 ? ts * 1000 : ts);
+                if (isNaN(d)) return ts;
+                return d.toLocaleString('zh-CN', { hour12: false });
+            },
+
+            statusBadgeClass(s) {
+                if (s >= 500) return 'badge-red';
+                if (s >= 400) return 'badge-yellow';
+                return 'badge-green';
             }
         };
     }

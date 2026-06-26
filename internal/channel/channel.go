@@ -142,6 +142,10 @@ func (ch *Channel) ReportSuccess(key string) {
 	ch.keyPool.ReportSuccess(key)
 }
 
+func (ch *Channel) RecordLatency(key string, ms int64) {
+	ch.keyPool.RecordLatency(key, ms)
+}
+
 func (ch *Channel) ReportError(key string, statusCode int) {
 	ch.keyPool.ReportError(key, statusCode)
 }

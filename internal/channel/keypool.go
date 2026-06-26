@@ -208,6 +208,17 @@ func (kp *KeyPool) ReportSuccess(key string) {
 	}
 }
 
+func (kp *KeyPool) RecordLatency(key string, ms int64) {
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+	for _, k := range kp.keys {
+		if k.Value == key {
+			k.State.RecordLatency(ms)
+			return
+		}
+	}
+}
+
 func (kp *KeyPool) ReportError(key string, statusCode int) {
 	kp.mu.RLock()
 	defer kp.mu.RUnlock()
