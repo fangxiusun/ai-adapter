@@ -24,6 +24,7 @@ All 12 cross-protocol conversion directions are supported, each in both streamin
 - **Streaming SSE**: Event-level streaming conversion for all protocol pairs
 - **Embedded Web UI**: Alpine.js management dashboard
 - **Structured Logging**: Configurable levels with optional request body capture
+- **Deep Debug Logging**: Per-request file-based tracing of client/upstream headers and bodies (JSON auto-formatted)
 - **SQLite Persistence**: Request logs and key statistics survive restarts
 
 ## Quick Start
@@ -41,6 +42,9 @@ cp config.example.yaml config.yaml
 
 # 3. Run
 ./ai-adapter -config config.yaml
+
+# (Optional) Enable deep debug logging
+./ai-adapter -config config.yaml --deep-debug
 ```
 
 ## Configuration
