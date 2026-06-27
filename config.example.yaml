@@ -1,4 +1,4 @@
-﻿server:
+server:
   host: "0.0.0.0"
   port: 8080
   api_token: ""
@@ -14,10 +14,21 @@ logging:
 database:
   path: "./data/proxy.db"
 
+# Proxy server definitions (optional). Channels reference these by proxy_id.
+# Supported types: http, socks5
+# proxies:
+#   - id: "hk-proxy"
+#     type: "http"
+#     url: "http://proxy.example.com:8080"
+#   - id: "us-socks"
+#     type: "socks5"
+#     url: "socks5://user:pass@socks.example.com:1080"
+
 channels:
   - id: "mimo"
     name: "MiMo"
     enabled: true
+    # proxy_id: "hk-proxy" 
     # Interface capability URLs. Setting a URL means the channel natively supports that interface.
     # Base URLs must NOT include /v1 or /v1beta paths.
     # OpenAI Chat Completions

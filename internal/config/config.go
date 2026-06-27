@@ -12,6 +12,7 @@ type Config struct {
 	Server   ServerConfig    `yaml:"server"`
 	Logging  LoggingConfig   `yaml:"logging"`
 	Database DatabaseConfig  `yaml:"database"`
+	Proxies  []ProxyConfig   `yaml:"proxies"`
 	Channels []ChannelConfig `yaml:"channels"`
 }
 
@@ -34,6 +35,13 @@ type DatabaseConfig struct {
 	Path string `yaml:"path" json:"path"`
 }
 
+// ProxyConfig defines a named proxy that channels can reference by proxy_id.
+type ProxyConfig struct {
+	ID   string `yaml:"id"`
+	Type string `yaml:"type"` // "http" or "socks5"
+	URL  string `yaml:"url"`
+}
+
 // ChannelConfig defines a channel with interface capability URLs.
 // The old wire_api field has been removed. Each channel declares native
 // support for interfaces by setting the corresponding URL.
@@ -41,6 +49,7 @@ type ChannelConfig struct {
 	ID               string         `yaml:"id"`
 	Name             string         `yaml:"name"`
 	Enabled          bool           `yaml:"enabled"`
+	ProxyID          string         `yaml:"proxy_id"`
 	Models           []ModelConfig  `yaml:"models"`
 	DefaultModel     string         `yaml:"default_model"`
 	Keys             []KeyConfig    `yaml:"keys"`
@@ -204,6 +213,24 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
+	// Validate proxies
+	proxyIDs := make(map[string]bool)
+	for _, p := range c.Proxies {
+		if p.ID == "" {
+			return fmt.Errorf("proxy id is required")
+		}
+		if proxyIDs[p.ID] {
+			return fmt.Errorf("duplicate proxy id: %s", p.ID)
+		}
+		proxyIDs[p.ID] = true
+		if p.Type != "http" && p.Type != "socks5" {
+			return fmt.Errorf("proxy %s: type must be http or socks5, got: %s", p.ID, p.Type)
+		}
+		if p.URL == "" {
+			return fmt.Errorf("proxy %s: url is required", p.ID)
+		}
+	}
+
 	if len(c.Channels) == 0 {
 		return fmt.Errorf("at least one channel is required")
 	}
@@ -216,6 +243,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("duplicate channel id: %s", ch.ID)
 		}
 		ids[ch.ID] = true
+		if ch.ProxyID != "" && !proxyIDs[ch.ProxyID] {
+			return fmt.Errorf("channel %s: proxy_id %q not found in proxies", ch.ID, ch.ProxyID)
+		}
 		if len(ch.Keys) == 0 {
 			return fmt.Errorf("channel %s: at least one key is required", ch.ID)
 		}
@@ -248,6 +278,16 @@ func maskKeyValue(s string) string {
 
 func (c *Config) GetTimeout() time.Duration {
 	return 60 * time.Second
+}
+
+// GetProxy returns the proxy config with the given id, or nil if not found.
+func (c *Config) GetProxy(id string) *ProxyConfig {
+	for i := range c.Proxies {
+		if c.Proxies[i].ID == id {
+			return &c.Proxies[i]
+		}
+	}
+	return nil
 }
 
 // HasAnyCapability returns true if the channel has at least one interface URL configured.

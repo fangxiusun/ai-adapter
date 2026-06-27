@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -52,6 +53,7 @@ func (h *WebHandler) handleChannels(w http.ResponseWriter, r *http.Request) {
 			list = append(list, map[string]interface{}{
 				"id":            ch.Config.ID,
 				"name":          ch.Config.Name,
+				"proxy_id":      ch.Config.ProxyID,
 				"chat_url": ch.Config.ChatURL, "responses_url": ch.Config.ResponsesURL, "messages_url": ch.Config.MessagesURL, "generate_content_url": ch.Config.GenerateContentURL,
 				"enabled":       ch.Config.Enabled,
 				"default_model": ch.Config.DefaultModel,
@@ -93,6 +95,7 @@ func (h *WebHandler) handleChannelByID(w http.ResponseWriter, r *http.Request) {
 		h.json(w, 200, map[string]interface{}{
 			"id":            ch.Config.ID,
 			"name":          ch.Config.Name,
+			"proxy_id":      ch.Config.ProxyID,
 			"chat_url": ch.Config.ChatURL, "responses_url": ch.Config.ResponsesURL, "messages_url": ch.Config.MessagesURL, "generate_content_url": ch.Config.GenerateContentURL,
 			"enabled":       ch.Config.Enabled,
 			"default_model": ch.Config.DefaultModel,
@@ -199,14 +202,36 @@ func (h *WebHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 
 func (h *WebHandler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
+		var proxies []map[string]interface{}
+		for _, p := range h.config.Proxies {
+			maskedURL := maskProxyURL(p.URL)
+			proxies = append(proxies, map[string]interface{}{
+				"id":   p.ID,
+				"type": p.Type,
+				"url":  maskedURL,
+			})
+		}
 		h.json(w, 200, map[string]interface{}{
 			"server":   h.config.Server,
 			"logging":  h.config.Logging,
 			"channels": len(h.config.Channels),
+			"proxies":  proxies,
 		})
 		return
 	}
 	h.jsonError(w, 405, "method_not_allowed", "use GET")
+}
+
+// maskProxyURL masks the password in proxy URLs like socks5://user:pass@host:port
+func maskProxyURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if u.User != nil {
+		u.User = url.UserPassword(u.User.Username(), "***")
+	}
+	return u.String()
 }
 
 func (h *WebHandler) handleValidKeys(w http.ResponseWriter, r *http.Request) {
@@ -269,4 +294,3 @@ func (h *WebHandler) jsonError(w http.ResponseWriter, status int, code, message 
 		},
 	})
 }
-

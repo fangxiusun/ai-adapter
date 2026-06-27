@@ -1,14 +1,18 @@
 package channel
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/db"
 	"github.com/fangxiusun/ai-adapter/internal/log"
+	"golang.org/x/net/proxy"
 )
 
 type Channel struct {
@@ -37,7 +41,7 @@ type ModelInfo struct {
 	Aliases           []string
 }
 
-func NewChannelManager(cfgs []config.ChannelConfig, logger *log.Logger, database *db.DB) *ChannelManager {
+func NewChannelManager(cfgs []config.ChannelConfig, proxies []config.ProxyConfig, logger *log.Logger, database *db.DB) *ChannelManager {
 	cm := &ChannelManager{
 		channels: make(map[string]*Channel),
 		logger:   logger,
@@ -47,13 +51,13 @@ func NewChannelManager(cfgs []config.ChannelConfig, logger *log.Logger, database
 		if i == 0 {
 			cm.defaultID = cfg.ID
 		}
-		ch := newChannel(cfg, logger, database)
+		ch := newChannel(cfg, proxies, logger, database)
 		cm.channels[cfg.ID] = ch
 	}
 	return cm
 }
 
-func newChannel(cfg config.ChannelConfig, logger *log.Logger, database *db.DB) *Channel {
+func newChannel(cfg config.ChannelConfig, proxies []config.ProxyConfig, logger *log.Logger, database *db.DB) *Channel {
 	models := make(map[string]config.ModelConfig)
 	for _, m := range cfg.Models {
 		models[m.ID] = m
@@ -62,14 +66,73 @@ func newChannel(cfg config.ChannelConfig, logger *log.Logger, database *db.DB) *
 		}
 	}
 	return &Channel{
-		Config:  cfg,
-		keyPool: NewKeyPool(cfg.Keys, cfg.KeyStrategy, cfg.ID, logger, cfg.Retry.ConsecErrorThreshold, cfg.Retry.PauseMultiplierSec, cfg.Retry.PauseMaxSec, database, time.Duration(cfg.KeyStatsSyncSec)*time.Second),
-		models:  models,
-		httpClient: &http.Client{
-			Timeout: time.Duration(cfg.RequestTimeoutMs) * time.Millisecond,
-		},
-		logger: logger,
+		Config:     cfg,
+		keyPool:    NewKeyPool(cfg.Keys, cfg.KeyStrategy, cfg.ID, logger, cfg.Retry.ConsecErrorThreshold, cfg.Retry.PauseMultiplierSec, cfg.Retry.PauseMaxSec, database, time.Duration(cfg.KeyStatsSyncSec)*time.Second),
+		models:     models,
+		httpClient: buildHTTPClient(cfg, proxies),
+		logger:     logger,
 	}
+}
+
+// buildHTTPClient creates an http.Client with optional proxy support.
+func buildHTTPClient(cfg config.ChannelConfig, proxies []config.ProxyConfig) *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout:  60 * time.Second,
+		ExpectContinueTimeout:  1 * time.Second,
+		MaxIdleConns:           100,
+		MaxIdleConnsPerHost:    10,
+		IdleConnTimeout:        90 * time.Second,
+	}
+
+	// Find and apply proxy if configured
+	if cfg.ProxyID != "" {
+		for _, p := range proxies {
+			if p.ID == cfg.ProxyID {
+				applyProxy(transport, p)
+				break
+			}
+		}
+	}
+
+	return &http.Client{
+		Timeout:   time.Duration(cfg.RequestTimeoutMs) * time.Millisecond,
+		Transport: transport,
+	}
+}
+
+// applyProxy configures the transport to use the given proxy.
+func applyProxy(transport *http.Transport, p config.ProxyConfig) {
+	switch p.Type {
+	case "http":
+		proxyURL, err := url.Parse(p.URL)
+		if err != nil {
+			return
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+
+	case "socks5":
+		socksDialer, err := proxy.SOCKS5("tcp", extractHostPort(p.URL), nil, proxy.Direct)
+		if err != nil {
+			return
+		}
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return socksDialer.Dial(network, addr)
+		}
+	}
+}
+
+// extractHostPort parses socks5://user:pass@host:port and returns host:port.
+func extractHostPort(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return u.Host
 }
 
 func (cm *ChannelManager) SelectChannel(model string) (*Channel, *ModelInfo, error) {

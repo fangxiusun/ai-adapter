@@ -56,7 +56,7 @@ func main() {
 	}
 	defer database.Close()
 
-	channels := channel.NewChannelManager(cfg.Channels, logger, database)
+	channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database)
 	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger)
 	webHandler := web.NewWebHandler(channels, database, cfg)
 
