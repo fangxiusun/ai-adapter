@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -269,14 +270,17 @@ func (h *WebHandler) handleValidKeys(w http.ResponseWriter, r *http.Request) {
 		result.Channels = append(result.Channels, ce)
 	}
 
-	out, err := yaml.Marshal(result)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	err := enc.Encode(&result)
 	if err != nil {
 		h.jsonError(w, 500, "marshal_failed", err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	w.WriteHeader(200)
-	w.Write(out)
+	w.Write(buf.Bytes())
 }
 
 func (h *WebHandler) json(w http.ResponseWriter, status int, data interface{}) {
