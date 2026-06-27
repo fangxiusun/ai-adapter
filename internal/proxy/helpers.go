@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,10 +22,38 @@ func (h *ProxyHandler) sendError(w http.ResponseWriter, status int, code, messag
 	})
 }
 
-// recordLog inserts a request log entry into the database with usage data.
-func (h *ProxyHandler) recordLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string) {
+// recordLog inserts a request log entry into the database with usage data
+// and records Prometheus metrics.
+func (h *ProxyHandler) recordLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string, apiType string) {
 	if h.db != nil {
 		h.db.InsertLog(reqID, channelID, clientModel, upstreamModel, status, latencyMs, key, errorCode, errorMsg, promptTokens, completionTokens, totalTokens, usageJSON)
+	}
+
+	// Prometheus metrics
+	statusStr := fmt.Sprintf("%d", status)
+	metrics.RequestsTotal.WithLabelValues(channelID, clientModel, apiType, statusStr).Inc()
+	metrics.RequestDurationSeconds.WithLabelValues(channelID, clientModel, apiType).Observe(float64(latencyMs) / 1000.0)
+
+	if promptTokens > 0 {
+		metrics.PromptTokensTotal.WithLabelValues(channelID, clientModel).Add(float64(promptTokens))
+	}
+	if completionTokens > 0 {
+		metrics.CompletionTokensTotal.WithLabelValues(channelID, clientModel).Add(float64(completionTokens))
+	}
+	if totalTokens > 0 {
+		metrics.TotalTokensTotal.WithLabelValues(channelID, clientModel).Add(float64(totalTokens))
+	}
+
+	if status >= 400 {
+		errCode := errorCode
+		if errCode == "" {
+			errCode = fmt.Sprintf("http_%d", status)
+		}
+		metrics.ErrorsTotal.WithLabelValues(channelID, clientModel, errCode).Inc()
+	}
+
+	if key != "" {
+		metrics.KeyUsageTotal.WithLabelValues(channelID, key).Inc()
 	}
 }
 
@@ -199,3 +228,5 @@ func applyProcessedHeaders(target http.Header, processed http.Header, preserveKe
 		}
 	}
 }
+
+

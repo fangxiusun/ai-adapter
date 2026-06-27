@@ -1,6 +1,7 @@
 package web
 
 import (
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"bytes"
 	"encoding/json"
 	"net/http"
@@ -35,6 +36,7 @@ func (h *WebHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/stats", h.handleStats)
 	mux.HandleFunc("/admin/api/config", h.handleConfig)
 	mux.HandleFunc("/admin/api/valid_keys", h.handleValidKeys)
+	mux.Handle("/metrics", promhttp.Handler())
 }
 
 func (h *WebHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -298,3 +300,6 @@ func (h *WebHandler) jsonError(w http.ResponseWriter, status int, code, message 
 		},
 	})
 }
+
+
+

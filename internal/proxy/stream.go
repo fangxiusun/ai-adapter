@@ -128,7 +128,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		pt, ct, tt, usageJSON := capture.Usage()
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON)
+		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return
 	}
@@ -243,7 +243,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(200)
 		h.emitStreamResponse(w, target, chatResp, chatReq, targetReq, flusher)
 		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON)
+		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return
 	}
@@ -428,3 +428,4 @@ func (h *ProxyHandler) emitGeminiStreamResponse(w io.Writer, chatResp *translate
 		flusher()
 	}
 }
+

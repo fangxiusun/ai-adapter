@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,6 +35,9 @@ func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *
 // ==================== Entry Points ====================
 
 func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
+	metrics.ActiveRequests.Inc()
+	defer metrics.ActiveRequests.Dec()
+
 	reqID := generateRequestID()
 	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/chat/completions", "target", "chat")
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
@@ -71,6 +75,9 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
+	metrics.ActiveRequests.Inc()
+	defer metrics.ActiveRequests.Dec()
+
 	reqID := generateRequestID()
 	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/responses", "target", "responses")
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
@@ -108,6 +115,9 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
+	metrics.ActiveRequests.Inc()
+	defer metrics.ActiveRequests.Dec()
+
 	reqID := generateRequestID()
 	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/messages", "target", "messages")
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
@@ -145,6 +155,9 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Request) {
+	metrics.ActiveRequests.Inc()
+	defer metrics.ActiveRequests.Dec()
+
 	reqID := generateRequestID()
 	model := extractGeminiModel(r.URL.Path)
 	stream := strings.Contains(r.URL.Path, "streamGenerateContent")
@@ -227,3 +240,8 @@ func (h *ProxyHandler) buildChatRequest(target config.InterfaceType, targetReq i
 		return nil, fmt.Errorf("unsupported target: %s", target)
 	}
 }
+
+
+
+
+

@@ -126,7 +126,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		resp.Body.Close()
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON)
+		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(iface))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return
 	}
@@ -246,7 +246,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(targetResp)
 	pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
-	h.recordLog(reqID, ch.Config.ID, model, model, 200, result.LatencyMs, result.Key.Value, "", "", pt, ct, tt, usageJSON)
+	h.recordLog(reqID, ch.Config.ID, model, model, 200, result.LatencyMs, result.Key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 	h.logger.LogRequest(reqID, "POST", logPath, 200, result.LatencyMs, result.Key.Value, ch.Config.ID, model)
 }
 
@@ -259,3 +259,5 @@ func (h *ProxyHandler) convertedStreamForward(w http.ResponseWriter, r *http.Req
 	}
 	h.streamChainConversion(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
 }
+
+
