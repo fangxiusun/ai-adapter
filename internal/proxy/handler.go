@@ -17,26 +17,29 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
 	"github.com/fangxiusun/ai-adapter/internal/log"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
+	"github.com/fangxiusun/ai-adapter/internal/headerpolicy"
 )
 
 type ProxyHandler struct {
-	channels *channel.ChannelManager
-	db       *db.DB
-	logger   *log.Logger
-	config   *config.Config
-	deepDebug *debuglog.DeepDebugLogger
+	channels    *channel.ChannelManager
+	db          *db.DB
+	logger      *log.Logger
+	config      *config.Config
+	deepDebug   *debuglog.DeepDebugLogger
+	headerEngine *headerpolicy.Engine
 }
 
-func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config, deepDebug *debuglog.DeepDebugLogger) *ProxyHandler {
-	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug}
+func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config, deepDebug *debuglog.DeepDebugLogger, headerEngine *headerpolicy.Engine) *ProxyHandler {
+	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug, headerEngine: headerEngine}
 }
 
 type UpstreamResult struct {
-	Body       []byte
-	StatusCode int
-	Key        *channel.KeyEntry
-	LatencyMs  int64
-	Error      error
+	Body            []byte
+	StatusCode      int
+	Headers         http.Header
+	Key             *channel.KeyEntry
+	LatencyMs       int64
+	Error           error
 }
 
 type RetryState struct {
@@ -292,6 +295,9 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
+		if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
+			applyProcessedHeaders(httpReq.Header, processed, "Content-Type", "Authorization")
+		}
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(body)
 		resp, err := ch.HTTPClient().Do(httpReq)
@@ -339,6 +345,9 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		}
 
 		if stream {
+			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+			}
 			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-transform")
 			w.Header().Set("Connection", "keep-alive")
@@ -348,6 +357,9 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
 			deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 			deepLog.LogUpstreamResponseBody(respBody)
+			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+			}
 			deepLog.LogClientResponseHeader(resp.StatusCode, w.Header())
 			deepLog.LogClientResponseBody(respBody)
 			w.Header().Set("Content-Type", "application/json")
@@ -400,6 +412,9 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
+		if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
+			applyProcessedHeaders(httpReq.Header, processed, "Content-Type", "Authorization")
+		}
 		h.logger.Debug("upstream request", "request_id", reqID, "method", "POST", "url", url, "body", string(sourceBody))
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
@@ -450,11 +465,14 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 
 		ch.RecordLatency(key.Value, latency)
 		ch.ReportSuccess(key.Value)
-		result = &UpstreamResult{Body: respBody, StatusCode: resp.StatusCode, Key: key, LatencyMs: latency}
+		result = &UpstreamResult{Body: respBody, StatusCode: resp.StatusCode, Headers: resp.Header, Key: key, LatencyMs: latency}
 		break
 	}
 	deepLog.LogUpstreamResponseHeader(result.StatusCode, nil)
 	deepLog.LogUpstreamResponseBody(result.Body)
+	if processed := h.processResponseHeaders(ch, model, result.Headers); processed != nil {
+		applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+	}
 	chatResp, err := convertSourceToChat(source, result.Body, chatReq)
 	if err != nil {
 		h.sendError(w, 502, "convert_from_source_failed", err.Error())
@@ -511,6 +529,9 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
+		if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
+			applyProcessedHeaders(httpReq.Header, processed, "Content-Type", "Authorization")
+		}
 		deepLog.LogUpstreamRequestBody(sourceBody)
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
@@ -559,6 +580,9 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
 		flusher := func() {
+		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+		}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -623,6 +647,9 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
+		if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
+			applyProcessedHeaders(httpReq.Header, processed, "Content-Type", "Authorization")
+		}
 		deepLog.LogUpstreamRequestBody(sourceBody)
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
@@ -680,6 +707,9 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
 		flusher := func() {
+		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+		}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -883,6 +913,44 @@ func (h *ProxyHandler) emitGeminiStreamResponse(w io.Writer, chatResp *translate
 	}
 }
 
+
+// ==================== Header Policy Helpers ====================
+
+// processRequestHeaders applies header policy to client request headers before sending to upstream.
+// Returns processed headers that should be applied to the upstream request.
+// Content-Type and Authorization are always set by the system, not affected by policy.
+func (h *ProxyHandler) processRequestHeaders(ch *channel.Channel, model string, clientHeaders http.Header) http.Header {
+	if h.headerEngine == nil {
+		return nil
+	}
+	return h.headerEngine.ProcessRequest(ch.Config.ID, model, clientHeaders)
+}
+
+// processResponseHeaders applies header policy to upstream response headers before sending to client.
+func (h *ProxyHandler) processResponseHeaders(ch *channel.Channel, model string, upstreamHeaders http.Header) http.Header {
+	if h.headerEngine == nil {
+		return nil
+	}
+	return h.headerEngine.ProcessResponse(ch.Config.ID, model, upstreamHeaders)
+}
+
+// applyProcessedHeaders applies processed headers to the target, preserving system headers.
+func applyProcessedHeaders(target http.Header, processed http.Header, preserveKeys ...string) {
+	if processed == nil {
+		return
+	}
+	// Build set of keys to preserve
+	preserve := make(map[string]bool)
+	for _, k := range preserveKeys {
+		preserve[strings.ToLower(k)] = true
+	}
+	for k, v := range processed {
+		if !preserve[strings.ToLower(k)] {
+			target[k] = v
+		}
+	}
+}
+
 // ==================== Helpers ====================
 
 func (h *ProxyHandler) getNextKey(ch *channel.Channel, rs *RetryState) *channel.KeyEntry {
@@ -939,3 +1007,9 @@ func stripUTF8BOM(b []byte) []byte {
 	}
 	return b
 }
+
+
+
+
+
+

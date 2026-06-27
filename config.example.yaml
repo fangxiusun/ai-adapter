@@ -14,6 +14,30 @@ logging:
 database:
   path: "./data/proxy.db"
 
+
+# Header Policy Configuration (optional)
+# Controls how HTTP headers between client and upstream.
+# Safety rules: Authorization, Cookie, X-Internal-* are always dropped in request phase.
+# Match types: exact (default), wildcard (*), regex (~ prefix)
+# headers:
+#   request:
+#     enabled: true
+#     default_action: pass
+#     drop: ["X-Debug-*", "~^x-internal-.*$"]  # wildcard and regex
+#     set:
+#       "X-Gateway-ID": "ai-adapter"
+#     pass: ["X-Custom-Auth"]
+#     rename:
+#       "X-Old-Name": "X-New-Name"
+#     append:
+#       "X-Tags": "suffix"
+#     prepend:
+#       "X-Tags": "prefix"
+#     copy:
+#       "X-Source": "X-Target"
+#   response:
+#     enabled: true
+#     drop: ["X-Upstream-*"]
 # Proxy server definitions (optional). Channels reference these by proxy_id.
 # Supported types: http, socks5
 # proxies:
@@ -77,6 +101,16 @@ channels:
       pause_max_sec: 600
     key_stats_sync_sec: 60  # Key 统计持久化到数据库的间隔（秒），默认 60
 
+    # Channel-level header policy (optional, overrides global)
+    # request_headers:
+    #   enabled: true
+    #   drop: ["X-Channel-Debug-*"]
+    #   set:
+    #     "X-Channel-ID": "mimo"
+    # response_headers:
+    #   enabled: true
+    #   drop: ["X-Upstream-*"]
+
   - id: "deepseek"
     name: "DeepSeek"
     enabled: true
@@ -106,3 +140,4 @@ channels:
       consec_error_threshold: 3
       pause_multiplier_sec: 30
       pause_max_sec: 600
+

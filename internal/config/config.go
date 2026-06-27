@@ -14,6 +14,13 @@ type Config struct {
 	Database DatabaseConfig  `yaml:"database"`
 	Proxies  []ProxyConfig   `yaml:"proxies"`
 	Channels []ChannelConfig `yaml:"channels"`
+
+	// New simplified format
+	Headers *HeadersConfig `yaml:"headers,omitempty"`
+
+	// Legacy format (still supported)
+	GlobalRequestHeaders  *HeaderPolicyConfig `yaml:"global_request_headers,omitempty"`
+	GlobalResponseHeaders *HeaderPolicyConfig `yaml:"global_response_headers,omitempty"`
 }
 
 type ServerConfig struct {
@@ -43,8 +50,6 @@ type ProxyConfig struct {
 }
 
 // ChannelConfig defines a channel with interface capability URLs.
-// The old wire_api field has been removed. Each channel declares native
-// support for interfaces by setting the corresponding URL.
 type ChannelConfig struct {
 	ID               string         `yaml:"id"`
 	Name             string         `yaml:"name"`
@@ -63,12 +68,14 @@ type ChannelConfig struct {
 	Retry            RetryConfig    `yaml:"retry"`
 	KeyStatsSyncSec  int            `yaml:"key_stats_sync_sec"`
 
-	// Interface capability URLs. Setting a URL means the channel natively
-	// supports that interface. Base URLs must NOT include /v1 or /v1beta paths.
 	ChatURL            string `yaml:"chat_url"`
 	ResponsesURL       string `yaml:"responses_url"`
 	MessagesURL        string `yaml:"messages_url"`
 	GenerateContentURL string `yaml:"generate_content_url"`
+
+	// Header policy configuration (optional)
+	RequestHeaders  *HeaderPolicyConfig `yaml:"request_headers,omitempty"`
+	ResponseHeaders *HeaderPolicyConfig `yaml:"response_headers,omitempty"`
 }
 
 type RetryConfig struct {
@@ -88,6 +95,10 @@ type ModelConfig struct {
 	SupportsImages    bool     `yaml:"supports_images"`
 	SupportsReasoning bool     `yaml:"supports_reasoning"`
 	Aliases           []string `yaml:"aliases"`
+
+	// Header policy configuration (optional)
+	RequestHeaders  *HeaderPolicyConfig `yaml:"request_headers,omitempty"`
+	ResponseHeaders *HeaderPolicyConfig `yaml:"response_headers,omitempty"`
 }
 
 type KeyConfig struct {
@@ -213,6 +224,11 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
+	// Validate header policies first
+	if err := c.validateAllHeaderPolicies(); err != nil {
+		return err
+	}
+
 	// Validate proxies
 	proxyIDs := make(map[string]bool)
 	for _, p := range c.Proxies {

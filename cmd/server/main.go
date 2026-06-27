@@ -17,6 +17,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
 	applog "github.com/fangxiusun/ai-adapter/internal/log"
 	"github.com/fangxiusun/ai-adapter/internal/proxy"
+	"github.com/fangxiusun/ai-adapter/internal/headerpolicy"
 	"github.com/fangxiusun/ai-adapter/internal/web"
 )
 
@@ -57,7 +58,8 @@ func main() {
 	defer database.Close()
 
 	channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database)
-	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger)
+	headerEngine := headerpolicy.NewEngine(cfg)
+	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger, headerEngine)
 	webHandler := web.NewWebHandler(channels, database, cfg)
 
 	mux := http.NewServeMux()
@@ -155,3 +157,4 @@ func chainMiddleware(handler http.Handler, middlewares ...func(http.Handler) htt
 	}
 	return handler
 }
+
