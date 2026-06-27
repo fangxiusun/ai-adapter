@@ -80,12 +80,6 @@ def format_as_yaml(keys: List[str], indent: int = 6, start_index: int = 1) -> st
     return "\n".join(lines)
 
 
-def format_tp_keys(text: str, indent: int = 6) -> str:
-    """从文本中提取 key 并格式化为 YAML（保持向后兼容）"""
-    keys = extract_keys(text)
-    return format_as_yaml(keys, indent=indent)
-
-
 def read_input(args) -> str:
     """读取输入内容"""
     # 从命令行参数读取
@@ -174,6 +168,12 @@ def main():
         action='store_true',
         help='显示重复的 key 统计'
     )
+    parser.add_argument(
+        '--keylen',
+        type=int,
+        default=0,
+        help='合理key长度，为0 不检测（默认：0）'
+    )
     
     args = parser.parse_args()
     
@@ -194,6 +194,8 @@ def main():
     deduplicate = not args.no_dedup
     keys = extract_keys(text, deduplicate=deduplicate)
     
+    if args.keylen:
+        keys = [x.strip() for x in keys if len(x.strip()) == args.keylen]
     if not keys:
         print("警告：未找到有效的 API key", file=sys.stderr)
         print("支持的 key 格式：tp-xxx, sk-xxx, sk-ant-xxx, ak-xxx", file=sys.stderr)

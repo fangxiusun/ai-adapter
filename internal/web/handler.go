@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/db"
@@ -30,6 +32,7 @@ func (h *WebHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/logs", h.handleLogs)
 	mux.HandleFunc("/admin/api/stats", h.handleStats)
 	mux.HandleFunc("/admin/api/config", h.handleConfig)
+	mux.HandleFunc("/admin/api/valid_keys", h.handleValidKeys)
 }
 
 func (h *WebHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +207,51 @@ func (h *WebHandler) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.jsonError(w, 405, "method_not_allowed", "use GET")
+}
+
+func (h *WebHandler) handleValidKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		h.jsonError(w, 405, "method_not_allowed", "use GET")
+		return
+	}
+
+	channels := h.channels.ListChannels()
+	type keyEntry struct {
+		Value string `yaml:"value"`
+		Name  string `yaml:"name"`
+	}
+	type channelEntry struct {
+		ID    string     `yaml:"id"`
+		Name  string     `yaml:"name"`
+		Keys  []keyEntry `yaml:"keys"`
+	}
+	var result struct {
+		Channels []channelEntry `yaml:"channels"`
+	}
+
+	for _, ch := range channels {
+		validKeys := ch.KeyPool().GetValidKeys()
+		if len(validKeys) == 0 {
+			continue
+		}
+		ce := channelEntry{
+			ID:   ch.Config.ID,
+			Name: ch.Config.Name,
+		}
+		for _, k := range validKeys {
+			ce.Keys = append(ce.Keys, keyEntry{Value: k.Value, Name: k.Name})
+		}
+		result.Channels = append(result.Channels, ce)
+	}
+
+	out, err := yaml.Marshal(result)
+	if err != nil {
+		h.jsonError(w, 500, "marshal_failed", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write(out)
 }
 
 func (h *WebHandler) json(w http.ResponseWriter, status int, data interface{}) {

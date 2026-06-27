@@ -418,6 +418,19 @@ func (kp *KeyPool) GetStats() []KeyStats {
 	return stats
 }
 
+// GetValidKeys returns key configs for keys that have never received a 401 error.
+func (kp *KeyPool) GetValidKeys() []config.KeyConfig {
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+	var valid []config.KeyConfig
+	for _, k := range kp.keys {
+		if k.State.Error401 == 0 && !k.State.PermanentlySkipped {
+			valid = append(valid, config.KeyConfig{Value: k.Value, Name: k.Name})
+		}
+	}
+	return valid
+}
+
 func (kp *KeyPool) PauseKey(keyValue string) {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
