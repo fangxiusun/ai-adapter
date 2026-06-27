@@ -18,7 +18,9 @@ import (
 	applog "github.com/fangxiusun/ai-adapter/internal/log"
 	"github.com/fangxiusun/ai-adapter/internal/proxy"
 	"github.com/fangxiusun/ai-adapter/internal/headerpolicy"
+	"github.com/fangxiusun/ai-adapter/internal/stats"
 	"github.com/fangxiusun/ai-adapter/internal/web"
+	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
 
 // Set by build ldflags.
@@ -57,10 +59,21 @@ func main() {
 	}
 	defer database.Close()
 
-	channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database)
+	// Initialize WebSocket Hub
+
+wsHub := websocket.NewHub()
+	go wsHub.Run()
+
+
+// Initialize Stats
+
+statsInstance := stats.NewStats()
+
+
+channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database)
 	headerEngine := headerpolicy.NewEngine(cfg)
-	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger, headerEngine)
-	webHandler := web.NewWebHandler(channels, database, cfg)
+	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger, headerEngine, statsInstance, wsHub)
+	webHandler := web.NewWebHandler(channels, database, cfg, statsInstance, wsHub)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", proxyHandler.HandleChat)
@@ -157,4 +170,10 @@ func chainMiddleware(handler http.Handler, middlewares ...func(http.Handler) htt
 	}
 	return handler
 }
+
+
+
+
+
+
 

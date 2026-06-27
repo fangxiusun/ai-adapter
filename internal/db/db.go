@@ -364,3 +364,21 @@ func maskKey(key string) string {
 	}
 	return key[:4] + "***" + key[len(key)-4:]
 }
+
+// QueryLogByRequestID queries a single log entry by request_id.
+func (db *DB) QueryLogByRequestID(requestID string) (*LogEntry, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	query := "SELECT id, request_id, timestamp, channel_id, model, status_code, latency_ms, key_name, error_code, error_message, COALESCE(prompt_tokens,0), COALESCE(completion_tokens,0), COALESCE(total_tokens,0), COALESCE(usage_json,'') FROM request_logs WHERE request_id = ? LIMIT 1"
+	var entry LogEntry
+	err := db.conn.QueryRow(query, requestID).Scan(
+		&entry.ID, &entry.RequestID, &entry.Timestamp, &entry.ChannelID, &entry.Model,
+		&entry.StatusCode, &entry.LatencyMs, &entry.KeyName, &entry.ErrorCode, &entry.ErrorMessage,
+		&entry.PromptTokens, &entry.CompletionTokens, &entry.TotalTokens, &entry.UsageJSON,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}

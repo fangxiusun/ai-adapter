@@ -14,16 +14,19 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/db"
+	"github.com/fangxiusun/ai-adapter/internal/stats"
+	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
 
 type WebHandler struct {
 	channels *channel.ChannelManager
 	db       *db.DB
 	config   *config.Config
+	stats    *stats.Stats
+	wsHub    *websocket.Hub
 }
-
-func NewWebHandler(channels *channel.ChannelManager, database *db.DB, cfg *config.Config) *WebHandler {
-	return &WebHandler{channels: channels, db: database, config: cfg}
+func NewWebHandler(channels *channel.ChannelManager, database *db.DB, cfg *config.Config, statsInstance *stats.Stats, hub *websocket.Hub) *WebHandler {
+	return &WebHandler{channels: channels, db: database, config: cfg, stats: statsInstance, wsHub: hub}
 }
 
 func (h *WebHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -37,6 +40,9 @@ func (h *WebHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/config", h.handleConfig)
 	mux.HandleFunc("/admin/api/valid_keys", h.handleValidKeys)
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/admin/api/ws", h.wsHub)
+	mux.HandleFunc("/admin/api/stats/history", h.handleStatsHistory)
+	mux.HandleFunc("/admin/api/logs/", h.handleLogDetail)
 }
 
 func (h *WebHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +90,21 @@ func (h *WebHandler) handleChannelByID(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasSuffix(r.URL.Path, "/test") {
 		h.handleChannelTest(w, ch)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/keys/batch") {
+		h.handleBatchKeys(w, r, ch)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/keys/export") {
+		h.handleExportKeys(w, r, ch)
+		return
+	}
+
+	if strings.HasSuffix(r.URL.Path, "/keys/import") {
+		h.handleImportKeys(w, r, ch)
 		return
 	}
 
@@ -300,6 +321,174 @@ func (h *WebHandler) jsonError(w http.ResponseWriter, status int, code, message 
 		},
 	})
 }
+
+
+
+
+
+
+// handleStatsHistory returns historical stats for charts.
+func (h *WebHandler) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		h.jsonError(w, 405, "method_not_allowed", "use GET")
+		return
+	}
+	minutes := 60
+	if m := r.URL.Query().Get("minutes"); m != "" {
+		if v, err := strconv.Atoi(m); err == nil && v > 0 && v <= 60 {
+			minutes = v
+		}
+	}
+	h.json(w, 200, map[string]interface{}{
+		"history": h.stats.GetHistory(minutes),
+		"errors":  h.stats.GetErrorDistribution(minutes),
+	})
+}
+
+// handleLogDetail returns detailed log entry by request_id.
+func (h *WebHandler) handleLogDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		h.jsonError(w, 405, "method_not_allowed", "use GET")
+		return
+	}
+	requestID := strings.TrimPrefix(r.URL.Path, "/admin/api/logs/")
+	if requestID == "" {
+		h.jsonError(w, 400, "missing_id", "request_id is required")
+		return
+	}
+	entry, err := h.db.QueryLogByRequestID(requestID)
+	if err != nil {
+		h.jsonError(w, 404, "not_found", "log not found")
+		return
+	}
+	h.json(w, 200, entry)
+}
+
+// handleBatchKeys handles batch key operations (pause/resume/delete).
+func (h *WebHandler) handleBatchKeys(w http.ResponseWriter, r *http.Request, ch *channel.Channel) {
+	if r.Method != "POST" {
+		h.jsonError(w, 405, "method_not_allowed", "use POST")
+		return
+	}
+	var req struct {
+		Action string   `json:"action"`
+		Keys   []string `json:"keys"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.jsonError(w, 400, "invalid_json", err.Error())
+		return
+	}
+	if len(req.Keys) == 0 {
+		h.jsonError(w, 400, "empty_keys", "keys array is required")
+		return
+	}
+	success := 0
+	var errors []string
+	for _, keyVal := range req.Keys {
+		switch req.Action {
+		case "pause":
+			ch.KeyPool().PauseKey(keyVal)
+			success++
+		case "resume":
+			ch.KeyPool().ResumeKey(keyVal)
+			success++
+		case "delete":
+			if err := ch.KeyPool().RemoveKey(keyVal); err != nil {
+				errors = append(errors, keyVal+": "+err.Error())
+			} else {
+				success++
+			}
+		default:
+			h.jsonError(w, 400, "invalid_action", "action must be pause, resume, or delete")
+			return
+		}
+	}
+	h.json(w, 200, map[string]interface{}{
+		"success": success,
+		"failed":  len(errors),
+		"errors":  errors,
+	})
+}
+
+// handleExportKeys exports channel keys in YAML format.
+func (h *WebHandler) handleExportKeys(w http.ResponseWriter, r *http.Request, ch *channel.Channel) {
+	if r.Method != "GET" {
+		h.jsonError(w, 405, "method_not_allowed", "use GET")
+		return
+	}
+	keys := ch.KeyPool().ListKeys()
+	type exportKey struct {
+		Name        string `yaml:"name"`
+		ValuePrefix string `yaml:"value_prefix"`
+	}
+	export := struct {
+		Keys []exportKey `yaml:"keys"`
+	}{}
+	for _, k := range keys {
+		prefix := k.Value
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		export.Keys = append(export.Keys, exportKey{Name: k.Name, ValuePrefix: prefix})
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	enc.Encode(&export)
+	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+	w.WriteHeader(200)
+	w.Write(buf.Bytes())
+}
+
+// handleImportKeys imports keys from YAML format.
+func (h *WebHandler) handleImportKeys(w http.ResponseWriter, r *http.Request, ch *channel.Channel) {
+	if r.Method != "POST" {
+		h.jsonError(w, 405, "method_not_allowed", "use POST")
+		return
+	}
+	var req struct {
+		Keys []struct {
+			Name  string `yaml:"name"`
+			Value string `yaml:"value"`
+		} `yaml:"keys"`
+	}
+	if err := yaml.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.jsonError(w, 400, "invalid_yaml", err.Error())
+		return
+	}
+	existingKeys := ch.KeyPool().ListKeys()
+	existingValues := make(map[string]bool)
+	for _, k := range existingKeys {
+		existingValues[k.Value] = true
+	}
+	added := 0
+	skipped := 0
+	var errors []string
+	for _, k := range req.Keys {
+		if k.Value == "" {
+			errors = append(errors, k.Name+": empty value")
+			continue
+		}
+		if existingValues[k.Value] {
+			skipped++
+			continue
+		}
+		if err := ch.KeyPool().AddKey(k.Value, k.Name); err != nil {
+			errors = append(errors, k.Name+": "+err.Error())
+		} else {
+			added++
+		}
+	}
+	h.json(w, 200, map[string]interface{}{
+		"added":   added,
+		"skipped": skipped,
+		"errors":  errors,
+	})
+}
+
+
+
+
 
 
 

@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"fmt"
 	"math/rand"
 	"sort"
 	"sync"
@@ -473,4 +474,51 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+
+// ListKeys returns all keys in the pool.
+func (kp *KeyPool) ListKeys() []config.KeyConfig {
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+	result := make([]config.KeyConfig, 0, len(kp.keys))
+	for _, k := range kp.keys {
+		result = append(result, config.KeyConfig{
+			Name:  k.Name,
+			Value: k.Value,
+		})
+	}
+	return result
+}
+
+// RemoveKey removes a key by value.
+func (kp *KeyPool) RemoveKey(keyValue string) error {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	for i, k := range kp.keys {
+		if k.Value == keyValue {
+			kp.keys = append(kp.keys[:i], kp.keys[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("key not found")
+}
+
+// AddKey adds a new key to the pool.
+func (kp *KeyPool) AddKey(value, name string) error {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	for _, k := range kp.keys {
+		if k.Value == value {
+			return fmt.Errorf("key already exists")
+		}
+	}
+	entry := &KeyEntry{
+		Name:  name,
+		Value: value,
+		State: NewKeyState(3, 30, 600),
+	}
+	kp.keys = append(kp.keys, entry)
+	return nil
+}
+
 

@@ -4,10 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ai-adapter - LLM API Proxy</title>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>`n    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link rel="stylesheet" href="/style.css">
 </head>
 <body x-data="app()" x-init="init()">
+    <div class="toast-container" id="toastContainer"></div>
     <nav class="sidebar">
         <div class="sidebar-brand">
             <span class="brand-icon">⚡</span>
@@ -25,6 +26,9 @@
             </a>
             <a :class="{'active': page === 'logs'}" @click.prevent="page='logs'; loadLogs()" href="#">
                 <span class="nav-icon">📋</span><span>日志</span>
+            </a>
+            <a :class="{'active': page === 'monitor'}" @click.prevent="page='monitor'; loadStatsHistory()" href="#">
+                <span class="nav-icon">📈</span><span>监控</span>
             </a>
             <a :class="{'active': page === 'settings'}" @click.prevent="page='settings'; loadConfig()" href="#">
                 <span class="nav-icon">⚙️</span><span>设置</span>
@@ -163,7 +167,8 @@
                         <table class="table">
                             <thead>
                                 <tr>
-                                    <th>名称</th>
+                                    <th class="checkbox-col"><input type="checkbox" x-model="selectAll" @change="toggleSelectAll(ch.id, ch.key_stats || [])"></th>
+                                            <th>名称</th>
                                     <th>状态</th>
                                     <th class="sortable" @click="sortKeys(ch.id, 'request_count')">请求 <span x-text="sortKey === ch.id+':request_count' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
                                     <th class="sortable" @click="sortKeys(ch.id, 'error_count')">错误 <span x-text="sortKey === ch.id+':error_count' ? (sortDir === 'asc' ? '↑' : '↓') : ''"></span></th>
@@ -182,7 +187,8 @@
                             <tbody>
                                 <template x-for="k in sortedKeyStats(ch.id, ch.key_stats) || []" :key="k.value || k.name">
                                     <tr>
-                                        <td><span class="mono" x-text="k.name || k.value"></span><br><span class="text-muted text-sm" x-text="k.value ? k.value.substring(0,8) + '***' : ''"></span></td>
+                                        <td class="checkbox-col"><input type="checkbox" :value="k.value" x-model="selectedKeys[ch.id]"></td>
+                                                <td><span class="mono" x-text="k.name || k.value"></span><br><span class="text-muted text-sm" x-text="k.value ? k.value.substring(0,8) + '***' : ''"></span></td>
                                         <td>
                                             <span class="badge" :class="k.paused ? 'badge-red' : 'badge-green'" x-text="k.paused ? '已暂停' : '活跃'"></span>
                                         </td>
@@ -252,14 +258,26 @@
                         <tbody>
                             <template x-for="log in logs" :key="log.request_id">
                                 <tr>
-                                    <td class="mono text-sm" x-text="fmtTime(log.timestamp)"></td>
-                                    <td class="mono text-sm" x-text="log.request_id"></td>
-                                    <td x-text="log.channel_id"></td>
-                                    <td class="mono text-sm" x-text="log.model"></td>
-                                    <td>
+                                    <td class="mono text-sm" x-text="fmtTime(log.timestamp)" @click="toggleLogDetail(log.request_id)" style="cursor:pointer"></td>
+                                    <td class="mono text-sm" x-text="log.request_id" @click="toggleLogDetail(log.request_id)" style="cursor:pointer"></td>
+                                    <td x-text="log.channel_id" @click="toggleLogDetail(log.request_id)" style="cursor:pointer"></td>
+                                    <td class="mono text-sm" x-text="log.model" @click="toggleLogDetail(log.request_id)" style="cursor:pointer"></td>
+                                    <td @click="toggleLogDetail(log.request_id)" style="cursor:pointer">
                                         <span class="badge" :class="statusBadgeClass(log.status_code)" x-text="log.status_code"></span>
                                     </td>
-                                    <td x-text="(log.latency_ms || 0) + 'ms'"></td>
+                                    <td x-text="(log.latency_ms || 0) + 'ms'" @click="toggleLogDetail(log.request_id)" style="cursor:pointer"></td>
+                                </tr>
+                                <tr x-show="expandedLog === log.request_id && logDetail">
+                                    <td colspan="6" class="log-detail-cell">
+                                        <div class="log-detail">
+                                            <div class="info-row"><span class="info-key">请求 ID</span><span class="mono" x-text="logDetail?.request_id"></span></div>
+                                            <div class="info-row"><span class="info-key">上游模型</span><span class="mono" x-text="logDetail?.upstream_model || logDetail?.model"></span></div>
+                                            <div class="info-row"><span class="info-key">Key</span><span class="mono" x-text="logDetail?.key_name || '-'"></span></div>
+                                            <div class="info-row"><span class="info-key">Token 用量</span><span x-text="'Prompt ' + (logDetail?.prompt_tokens || 0).toLocaleString() + ' | Completion ' + (logDetail?.completion_tokens || 0).toLocaleString()"></span></div>
+                                            <div class="info-row"><span class="info-key">总 Tokens</span><span x-text="(logDetail?.total_tokens || 0).toLocaleString()"></span></div>
+                                            <div class="info-row"><span class="info-key">错误信息</span><span :class="logDetail?.error_message ? 'text-red' : ''" x-text="logDetail?.error_message || '-'"></span></div>
+                                        </div>
+                                    </td>
                                 </tr>
                             </template>
                             <tr x-show="logs.length === 0">
@@ -267,6 +285,77 @@
                             </tr>
                         </tbody>
                     </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ========== Monitor ========== -->
+        <div x-show="page === 'monitor'" x-cloak>
+            <div class="page-header">
+                <h1>实时监控</h1>
+                <span class="badge" :class="wsConnected ? 'badge-green' : 'badge-red'" x-text="wsConnected ? '已连接' : '未连接'"></span>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon">⚡</div>
+                    <div class="stat-body">
+                        <div class="stat-value" x-text="realtime.activeRequests"></div>
+                        <div class="stat-label">活跃请求</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📊</div>
+                    <div class="stat-body">
+                        <div class="stat-value" x-text="realtime.qps.toFixed(1)"></div>
+                        <div class="stat-label">QPS</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⏱️</div>
+                    <div class="stat-body">
+                        <div class="stat-value" x-text="realtime.avgLatency + 'ms'"></div>
+                        <div class="stat-label">平均延迟</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">❌</div>
+                    <div class="stat-body">
+                        <div class="stat-value" :class="realtime.errorRate > 0.05 ? 'text-red' : ''" x-text="(realtime.errorRate * 100).toFixed(1) + '%'"></div>
+                        <div class="stat-label">错误率</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-grid">
+                <div class="card">
+                    <div class="card-header"><span class="card-title">请求趋势（最近 1 小时）</span></div>
+                    <div class="card-body">
+                        <canvas id="requestTrendChart" height="200"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><span class="card-title">错误分布</span></div>
+                    <div class="card-body">
+                        <canvas id="errorDistChart" height="200"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card card-full">
+                <div class="card-header"><span class="card-title">实时日志流</span></div>
+                <div class="card-body no-padding">
+                    <div class="live-log-container" id="liveLogContainer">
+                        <template x-for="log in liveLogs" :key="log.request_id">
+                            <div class="live-log-row">
+                                <span class="mono text-sm" x-text="fmtTime(log.timestamp)"></span>
+                                <span x-text="log.channel"></span>
+                                <span class="mono text-sm" x-text="log.model"></span>
+                                <span class="badge" :class="statusBadgeClass(log.status)" x-text="log.status"></span>
+                                <span x-text="log.latency_ms + 'ms'"></span>
+                            </div>
+                        </template>
+                    </div>
                 </div>
             </div>
         </div>
@@ -316,6 +405,17 @@
             sortKey: '',
             sortDir: 'asc',
 
+            // Realtime state
+            wsConnected: false,
+            realtime: { activeRequests: 0, qps: 0, avgLatency: 0, errorRate: 0 },
+            liveLogs: [],
+            requestTrendChart: null,
+            errorDistChart: null,
+            expandedLog: null,
+            logDetail: null,
+            selectedKeys: {},
+            selectAll: false,
+
             get totalKeys() {
                 let n = 0;
                 for (const ch of this.stats.channels || []) n += ch.key_count || 0;
@@ -325,6 +425,164 @@
             async init() {
                 await this.fetchStats();
                 this.healthy = true;
+                this.connectWebSocket();
+            },
+
+            connectWebSocket() {
+                const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const ws = new WebSocket(protocol + '//' + location.host + '/admin/api/ws');
+                ws.onopen = () => { this.wsConnected = true; };
+                ws.onclose = () => {
+                    this.wsConnected = false;
+                    setTimeout(() => this.connectWebSocket(), 3000);
+                };
+                ws.onmessage = (event) => {
+                    const msg = JSON.parse(event.data);
+                    this.handleWSMessage(msg);
+                };
+            },
+
+            handleWSMessage(msg) {
+                switch (msg.type) {
+                    case 'heartbeat':
+                        this.realtime.activeRequests = msg.data.active_requests;
+                        break;
+                    case 'log':
+                        this.liveLogs.unshift(msg.data);
+                        if (this.liveLogs.length > 20) this.liveLogs.pop();
+                        break;
+                    case 'metrics':
+                        this.realtime.qps = msg.data.qps;
+                        this.realtime.avgLatency = msg.data.avg_latency_ms;
+                        this.realtime.errorRate = msg.data.error_rate;
+                        break;
+                    case 'key_event':
+                        this.showToast(msg.data.channel + '/' + msg.data.key + ': ' + msg.data.event);
+                        break;
+                }
+            },
+
+            async loadStatsHistory() {
+                try {
+                    const r = await fetch('/admin/api/stats/history?minutes=60');
+                    if (r.ok) {
+                        const d = await r.json();
+                        this.initCharts(d);
+                    }
+                } catch {}
+            },
+
+            initCharts(data) {
+                if (this.requestTrendChart) this.requestTrendChart.destroy();
+                if (this.errorDistChart) this.errorDistChart.destroy();
+
+                const trendCtx = document.getElementById('requestTrendChart');
+                if (trendCtx) {
+                    this.requestTrendChart = new Chart(trendCtx, {
+                        type: 'line',
+                        data: {
+                            labels: data.history.map(h => h.timestamp),
+                            datasets: [
+                                { label: '成功', data: data.history.map(h => h.success), borderColor: '#10B981', tension: 0.3 },
+                                { label: '错误', data: data.history.map(h => h.errors), borderColor: '#EF4444', tension: 0.3 }
+                            ]
+                        },
+                        options: { responsive: true, scales: { y: { beginAtZero: true } } }
+                    });
+                }
+
+                const distCtx = document.getElementById('errorDistChart');
+                if (distCtx) {
+                    const colors = { '2xx': '#10B981', '400': '#F59E0B', '401': '#F97316', '429': '#EF4444', '4xx': '#8B5CF6', '5xx': '#DC2626' };
+                    this.errorDistChart = new Chart(distCtx, {
+                        type: 'doughnut',
+                        data: {
+                            labels: data.errors.map(e => e.status),
+                            datasets: [{
+                                data: data.errors.map(e => e.count),
+                                backgroundColor: data.errors.map(e => colors[e.status] || '#6B7280')
+                            }]
+                        }
+                    });
+                }
+            },
+
+            async toggleLogDetail(requestId) {
+                if (this.expandedLog === requestId) {
+                    this.expandedLog = null;
+                    this.logDetail = null;
+                    return;
+                }
+                this.expandedLog = requestId;
+                try {
+                    const r = await fetch('/admin/api/logs/' + requestId);
+                    if (r.ok) this.logDetail = await r.json();
+                } catch {}
+            },
+
+            showToast(message) {
+                const container = document.getElementById('toastContainer');
+                if (!container) return;
+                const toast = document.createElement('div');
+                toast.className = 'toast';
+                toast.textContent = message;
+                container.appendChild(toast);
+                setTimeout(() => toast.remove(), 3000);
+            },
+
+            toggleSelectAll(channelId, keys) {
+                if (this.selectAll) {
+                    this.selectedKeys[channelId] = (keys || []).map(k => k.value);
+                } else {
+                    this.selectedKeys[channelId] = [];
+                }
+            },
+
+            async batchKeyAction(channelId, action) {
+                const keys = this.selectedKeys[channelId] || [];
+                if (keys.length === 0) return;
+                if (action === 'delete' && !confirm('确认删除 ' + keys.length + ' 个 Key？')) return;
+                try {
+                    const r = await fetch('/admin/api/channels/' + channelId + '/keys/batch', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action, keys })
+                    });
+                    if (r.ok) {
+                        const d = await r.json();
+                        this.showToast(action + ': 成功 ' + d.success + ', 失败 ' + d.failed);
+                        this.selectedKeys[channelId] = [];
+                        await this.loadChannels();
+                    }
+                } catch {}
+            },
+
+            async exportKeys(channelId) {
+                window.open('/admin/api/channels/' + channelId + '/keys/export');
+            },
+
+            async importKeys(channelId) {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.yaml,.yml';
+                input.onchange = async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    const text = await file.text();
+                    try {
+                        const r = await fetch('/admin/api/channels/' + channelId + '/keys/import', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'text/yaml' },
+                            body: text
+                        });
+                        if (r.ok) {
+                            const d = await r.json();
+                            this.showToast('导入完成: 新增 ' + d.added + ', 跳过 ' + d.skipped);
+                            await this.loadChannels();
+                        }
+                    } catch {}
+                };
+                input.click();
             },
 
             async fetchStats() {
@@ -419,3 +677,4 @@
     </script>
 </body>
 </html>
+

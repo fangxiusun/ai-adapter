@@ -14,7 +14,9 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
 	"github.com/fangxiusun/ai-adapter/internal/headerpolicy"
 	"github.com/fangxiusun/ai-adapter/internal/log"
+	"github.com/fangxiusun/ai-adapter/internal/stats"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
+	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
 
 // ProxyHandler handles incoming API requests and dispatches them to upstream services.
@@ -25,11 +27,13 @@ type ProxyHandler struct {
 	config       *config.Config
 	deepDebug    *debuglog.DeepDebugLogger
 	headerEngine *headerpolicy.Engine
+	stats        *stats.Stats
+	wsHub        *websocket.Hub
 }
 
 // NewProxyHandler creates a new ProxyHandler.
-func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config, deepDebug *debuglog.DeepDebugLogger, headerEngine *headerpolicy.Engine) *ProxyHandler {
-	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug, headerEngine: headerEngine}
+func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config, deepDebug *debuglog.DeepDebugLogger, headerEngine *headerpolicy.Engine, statsInstance *stats.Stats, hub *websocket.Hub) *ProxyHandler {
+	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug, headerEngine: headerEngine, stats: statsInstance, wsHub: hub}
 }
 
 // ==================== Entry Points ====================
@@ -240,6 +244,11 @@ func (h *ProxyHandler) buildChatRequest(target config.InterfaceType, targetReq i
 		return nil, fmt.Errorf("unsupported target: %s", target)
 	}
 }
+
+
+
+
+
 
 
 

@@ -55,6 +55,23 @@ func (h *ProxyHandler) recordLog(reqID, channelID, clientModel, upstreamModel st
 	if key != "" {
 		metrics.KeyUsageTotal.WithLabelValues(channelID, key).Inc()
 	}
+
+	// Record stats
+	if h.stats != nil {
+		h.stats.Record(status)
+	}
+
+	// Broadcast via WebSocket
+	if h.wsHub != nil {
+		h.wsHub.Broadcast("log", map[string]interface{}{
+			"request_id": reqID,
+			"channel":    channelID,
+			"model":      clientModel,
+			"status":     status,
+			"latency_ms": latencyMs,
+			"timestamp":  time.Now().Format(time.RFC3339),
+		})
+	}
 }
 
 func generateRequestID() string {
@@ -228,5 +245,7 @@ func applyProcessedHeaders(target http.Header, processed http.Header, preserveKe
 		}
 	}
 }
+
+
 
 
