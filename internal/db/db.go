@@ -98,18 +98,28 @@ func (db *DB) migrate() error {
 			return fmt.Errorf("exec migration: %w", err)
 		}
 	}
+
+	// Incremental migrations for existing databases
+	alterMigrations := []string{
+		`ALTER TABLE request_logs ADD COLUMN usage_json TEXT`,
+	}
+	for _, m := range alterMigrations {
+		db.conn.Exec(m) // ignore "duplicate column" errors on re-run
+	}
+
 	return nil
 }
 
-func (db *DB) InsertLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string) {
+func (db *DB) InsertLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	_, err := db.conn.Exec(
-		`INSERT INTO request_logs (request_id, timestamp, channel_id, client_api, upstream_api, model, status_code, latency_ms, key_name, error_code, error_message)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO request_logs (request_id, timestamp, channel_id, client_api, upstream_api, model, status_code, latency_ms, key_name, error_code, error_message, prompt_tokens, completion_tokens, total_tokens, usage_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		reqID, time.Now().UnixMilli(), channelID, "responses", "chat",
 		upstreamModel, status, latencyMs, maskKey(key), errorCode, errorMsg,
+		promptTokens, completionTokens, totalTokens, usageJSON,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to insert log: %v\n", err)
@@ -117,23 +127,27 @@ func (db *DB) InsertLog(reqID, channelID, clientModel, upstreamModel string, sta
 }
 
 type LogEntry struct {
-	ID           int64  `json:"id"`
-	RequestID    string `json:"request_id"`
-	Timestamp    int64  `json:"timestamp"`
-	ChannelID    string `json:"channel_id"`
-	Model        string `json:"model"`
-	StatusCode   int    `json:"status_code"`
-	LatencyMs    int64  `json:"latency_ms"`
-	KeyName      string `json:"key_name"`
-	ErrorCode    string `json:"error_code"`
-	ErrorMessage string `json:"error_message"`
+	ID              int64  `json:"id"`
+	RequestID       string `json:"request_id"`
+	Timestamp       int64  `json:"timestamp"`
+	ChannelID       string `json:"channel_id"`
+	Model           string `json:"model"`
+	StatusCode      int    `json:"status_code"`
+	LatencyMs       int64  `json:"latency_ms"`
+	KeyName         string `json:"key_name"`
+	ErrorCode       string `json:"error_code"`
+	ErrorMessage    string `json:"error_message"`
+	PromptTokens    int    `json:"prompt_tokens"`
+	CompletionTokens int   `json:"completion_tokens"`
+	TotalTokens     int    `json:"total_tokens"`
+	UsageJSON       string `json:"usage_json,omitempty"`
 }
 
 func (db *DB) QueryLogs(channelID string, statusMin, statusMax int, from, to int64, limit, offset int) ([]LogEntry, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
-	query := "SELECT id, request_id, timestamp, channel_id, model, status_code, latency_ms, key_name, error_code, error_message FROM request_logs WHERE 1=1"
+	query := "SELECT id, request_id, timestamp, channel_id, model, status_code, latency_ms, key_name, error_code, error_message, COALESCE(prompt_tokens,0), COALESCE(completion_tokens,0), COALESCE(total_tokens,0), COALESCE(usage_json,'') FROM request_logs WHERE 1=1"
 	args := []interface{}{}
 
 	if channelID != "" {
@@ -174,7 +188,7 @@ func (db *DB) QueryLogs(channelID string, statusMin, statusMax int, from, to int
 	var logs []LogEntry
 	for rows.Next() {
 		var l LogEntry
-		if err := rows.Scan(&l.ID, &l.RequestID, &l.Timestamp, &l.ChannelID, &l.Model, &l.StatusCode, &l.LatencyMs, &l.KeyName, &l.ErrorCode, &l.ErrorMessage); err != nil {
+		if err := rows.Scan(&l.ID, &l.RequestID, &l.Timestamp, &l.ChannelID, &l.Model, &l.StatusCode, &l.LatencyMs, &l.KeyName, &l.ErrorCode, &l.ErrorMessage, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.UsageJSON); err != nil {
 			continue
 		}
 		logs = append(logs, l)

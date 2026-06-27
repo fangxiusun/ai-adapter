@@ -20,7 +20,10 @@ import (
 // ==================== Stream Forwarding ====================
 
 func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) {
-	sourceBody, err := json.Marshal(chatReq)
+	// Inject stream_options.include_usage=true for Chat upstream.
+	injectedReq := *chatReq
+	injectedReq.StreamOptions = &translate.StreamOptions{IncludeUsage: true}
+	sourceBody, err := json.Marshal(&injectedReq)
 	if err != nil {
 		h.sendError(w, 500, "marshal_failed", err.Error())
 		return
@@ -96,6 +99,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
+		capture := newStreamUsageCapture(resp.Body)
 		flusher := func() {
 		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
 			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
@@ -111,19 +115,20 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(200)
 		switch target {
 		case config.InterfaceChat:
-			io.Copy(w, resp.Body)
+			io.Copy(w, capture)
 		case config.InterfaceResponses:
 			respReq, _ := targetReq.(*translate.ResponsesRequest)
-			translate.PipeChatStreamToResponses(r.Context(), resp.Body, w, respReq, translate.TranslateOpts{ExtractInlineThink: true})
+			translate.PipeChatStreamToResponses(r.Context(), capture, w, respReq, translate.TranslateOpts{ExtractInlineThink: true})
 		case config.InterfaceMessages:
-			translate.PipeChatStreamToClaude(r.Context(), resp.Body, w, chatReq, flusher)
+			translate.PipeChatStreamToClaude(r.Context(), capture, w, chatReq, flusher)
 		case config.InterfaceGenerateContent:
-			translate.PipeChatStreamToGemini(r.Context(), resp.Body, w, chatReq, flusher)
+			translate.PipeChatStreamToGemini(r.Context(), capture, w, chatReq, flusher)
 		}
 		resp.Body.Close()
+		pt, ct, tt, usageJSON := capture.Usage()
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "")
+		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON)
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return
 	}
@@ -237,7 +242,8 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		deepLog.LogClientResponseHeader(200, w.Header())
 		w.WriteHeader(200)
 		h.emitStreamResponse(w, target, chatResp, chatReq, targetReq, flusher)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "")
+		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
+		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON)
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return
 	}

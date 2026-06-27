@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
+	"github.com/fangxiusun/ai-adapter/internal/config"
+	"github.com/fangxiusun/ai-adapter/internal/translate"
 )
 
 // sendError writes a JSON error response to the client.
@@ -19,10 +21,10 @@ func (h *ProxyHandler) sendError(w http.ResponseWriter, status int, code, messag
 	})
 }
 
-// recordLog inserts a request log entry into the database.
-func (h *ProxyHandler) recordLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string) {
+// recordLog inserts a request log entry into the database with usage data.
+func (h *ProxyHandler) recordLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string) {
 	if h.db != nil {
-		h.db.InsertLog(reqID, channelID, clientModel, upstreamModel, status, latencyMs, key, errorCode, errorMsg)
+		h.db.InsertLog(reqID, channelID, clientModel, upstreamModel, status, latencyMs, key, errorCode, errorMsg, promptTokens, completionTokens, totalTokens, usageJSON)
 	}
 }
 
@@ -31,8 +33,6 @@ func generateRequestID() string {
 }
 
 // stripUTF8BOM removes a leading UTF-8 BOM (EF BB BF) from the byte slice.
-// Some HTTP clients (notably PowerShell on Windows) prepend a BOM to request
-// bodies, which causes strict JSON parsers in upstream APIs to reject the payload.
 func stripUTF8BOM(b []byte) []byte {
 	if len(b) >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
 		return b[3:]
@@ -40,11 +40,135 @@ func stripUTF8BOM(b []byte) []byte {
 	return b
 }
 
+// ==================== Usage Helpers ====================
+
+// normalizeUsage extracts standardized token counts from a ChatUsage and returns
+// (promptTokens, completionTokens, totalTokens, usageJSON).
+func normalizeUsage(usage *translate.ChatUsage) (int, int, int, string) {
+	if usage == nil {
+		return 0, 0, 0, ""
+	}
+	b, _ := json.Marshal(usage)
+	return usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, string(b)
+}
+
+// extractUsageFromRawBody extracts usage data from a raw upstream response body
+// based on the interface protocol type.
+func extractUsageFromRawBody(iface config.InterfaceType, body []byte) (int, int, int, string) {
+	if len(body) == 0 {
+		return 0, 0, 0, ""
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return 0, 0, 0, ""
+	}
+
+	switch iface {
+	case config.InterfaceChat:
+		return extractChatUsage(raw)
+	case config.InterfaceResponses:
+		return extractResponsesUsage(raw)
+	case config.InterfaceMessages:
+		return extractClaudeUsage(raw)
+	case config.InterfaceGenerateContent:
+		return extractGeminiUsage(raw)
+	}
+	return 0, 0, 0, ""
+}
+
+func extractChatUsage(raw map[string]interface{}) (int, int, int, string) {
+	u, ok := raw["usage"].(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, ""
+	}
+	pt := toInt(u["prompt_tokens"])
+	ct := toInt(u["completion_tokens"])
+	tt := toInt(u["total_tokens"])
+	b, _ := json.Marshal(u)
+	return pt, ct, tt, string(b)
+}
+
+func extractResponsesUsage(raw map[string]interface{}) (int, int, int, string) {
+	u, ok := raw["usage"].(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, ""
+	}
+	pt := toInt(u["input_tokens"])
+	ct := toInt(u["output_tokens"])
+	tt := toInt(u["total_tokens"])
+	b, _ := json.Marshal(u)
+	return pt, ct, tt, string(b)
+}
+
+func extractClaudeUsage(raw map[string]interface{}) (int, int, int, string) {
+	u, ok := raw["usage"].(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, ""
+	}
+	pt := toInt(u["input_tokens"])
+	ct := toInt(u["output_tokens"])
+	tt := pt + ct
+	b, _ := json.Marshal(u)
+	return pt, ct, tt, string(b)
+}
+
+func extractGeminiUsage(raw map[string]interface{}) (int, int, int, string) {
+	u, ok := raw["usageMetadata"].(map[string]interface{})
+	if !ok {
+		return 0, 0, 0, ""
+	}
+	pt := toInt(u["promptTokenCount"])
+	ct := toInt(u["candidatesTokenCount"])
+	tt := toInt(u["totalTokenCount"])
+	b, _ := json.Marshal(u)
+	return pt, ct, tt, string(b)
+}
+
+// toInt converts a numeric interface{} to int. Returns 0 for nil or non-numeric.
+func toInt(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
+
+// injectStreamOptions ensures stream_options.include_usage is true for Chat requests
+// unless the user explicitly set it to false. Modifies body in-place and returns
+// the (possibly new) body bytes.
+func injectStreamOptions(body []byte) []byte {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	opts, _ := raw["stream_options"].(map[string]interface{})
+	if opts != nil {
+		if v, ok := opts["include_usage"]; ok && v == false {
+			return body // user explicitly disabled it
+		}
+	}
+	if opts == nil {
+		opts = make(map[string]interface{})
+	}
+	opts["include_usage"] = true
+	raw["stream_options"] = opts
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // ==================== Header Policy Helpers ====================
 
 // processRequestHeaders applies header policy to client request headers before sending to upstream.
-// Returns processed headers that should be applied to the upstream request.
-// Content-Type and Authorization are always set by the system, not affected by policy.
 func (h *ProxyHandler) processRequestHeaders(ch *channel.Channel, model string, clientHeaders http.Header) http.Header {
 	if h.headerEngine == nil {
 		return nil

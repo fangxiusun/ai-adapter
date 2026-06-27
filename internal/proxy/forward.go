@@ -18,6 +18,11 @@ import (
 // ==================== Native Forwarding ====================
 
 func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, iface config.InterfaceType, body []byte, model string, stream bool, deepLog *debuglog.RequestLog) {
+	// For Chat requests, inject stream_options.include_usage=true unless explicitly disabled.
+	if iface == config.InterfaceChat {
+		body = injectStreamOptions(body)
+	}
+
 	path := upstreamPathForInterface(iface, model, stream)
 	logPath := path
 	if idx := strings.Index(logPath, "?"); idx >= 0 {
@@ -90,7 +95,11 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			return
 		}
 
+		var pt, ct, tt int
+		var usageJSON string
+
 		if stream {
+			capture := newStreamUsageCapture(resp.Body)
 			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
 				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
 			}
@@ -98,7 +107,8 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			w.Header().Set("Cache-Control", "no-cache, no-transform")
 			w.Header().Set("Connection", "keep-alive")
 			w.WriteHeader(200)
-			io.Copy(w, resp.Body)
+			io.Copy(w, capture)
+			pt, ct, tt, usageJSON = capture.Usage()
 		} else {
 			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
 			deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
@@ -111,11 +121,12 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
 			w.Write(respBody)
+			pt, ct, tt, usageJSON = extractUsageFromRawBody(iface, respBody)
 		}
 		resp.Body.Close()
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "")
+		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON)
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return
 	}
@@ -234,7 +245,8 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(targetResp)
-	h.recordLog(reqID, ch.Config.ID, model, model, 200, result.LatencyMs, result.Key.Value, "", "")
+	pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
+	h.recordLog(reqID, ch.Config.ID, model, model, 200, result.LatencyMs, result.Key.Value, "", "", pt, ct, tt, usageJSON)
 	h.logger.LogRequest(reqID, "POST", logPath, 200, result.LatencyMs, result.Key.Value, ch.Config.ID, model)
 }
 
