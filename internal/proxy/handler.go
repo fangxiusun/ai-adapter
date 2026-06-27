@@ -528,10 +528,10 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
-		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
 			applyProcessedHeaders(httpReq.Header, processed, "Content-Type", "Authorization")
 		}
+		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
@@ -646,10 +646,10 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
-		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
 			applyProcessedHeaders(httpReq.Header, processed, "Content-Type", "Authorization")
 		}
+		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
@@ -939,7 +939,6 @@ func applyProcessedHeaders(target http.Header, processed http.Header, preserveKe
 	if processed == nil {
 		return
 	}
-	// Build set of keys to preserve
 	preserve := make(map[string]bool)
 	for _, k := range preserveKeys {
 		preserve[strings.ToLower(k)] = true
