@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -105,6 +106,7 @@ channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, databas
 	middleware := chainMiddleware(mux,
 		loggingMiddleware(logger),
 		corsMiddleware(),
+		authMiddleware(cfg.Server.APIToken),
 	)
 
 	server := &http.Server{
@@ -182,6 +184,37 @@ func corsMiddleware() func(http.Handler) http.Handler {
 	}
 }
 
+
+func authMiddleware(apiToken string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if apiToken == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			path := r.URL.Path
+			if !strings.HasPrefix(path, "/v1/") && !strings.HasPrefix(path, "/v1beta/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			auth := r.Header.Get("Authorization")
+			const prefix = "Bearer "
+			if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
+				if auth[len(prefix):] == apiToken {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			if r.Header.Get("x-api-key") == apiToken {
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"error":{"type":"authentication_error","code":"unauthorized","message":"invalid or missing api token"}}`)
+		})
+	}
+}
 func chainMiddleware(handler http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		handler = middlewares[i](handler)

@@ -15,6 +15,9 @@ import (
 
 // sendError writes a JSON error response to the client.
 func (h *ProxyHandler) sendError(w http.ResponseWriter, status int, code, message string) {
+	if status <= 0 {
+		status = 502
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
