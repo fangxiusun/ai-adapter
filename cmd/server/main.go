@@ -20,6 +20,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/headerpolicy"
 	"github.com/fangxiusun/ai-adapter/internal/stats"
 	"github.com/fangxiusun/ai-adapter/internal/web"
+	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
 
@@ -64,10 +65,27 @@ func main() {
 wsHub := websocket.NewHub()
 	go wsHub.Run()
 
+	// Start heartbeat with active request count
+	wsHub.StartHeartbeat(func() int {
+		return int(metrics.GetActiveRequests())
+	})
 
 // Initialize Stats
 
 statsInstance := stats.NewStats()
+
+	// Start periodic metrics broadcaster (every 5 seconds)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			wsHub.Broadcast("metrics", map[string]interface{}{
+				"qps":            statsInstance.GetCurrentQPS(),
+				"avg_latency_ms": statsInstance.GetAvgLatencyMs(),
+				"error_rate":     statsInstance.GetErrorRate(),
+			})
+		}
+	}()
 
 
 channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database, cfg.Failover.LoadBalance)

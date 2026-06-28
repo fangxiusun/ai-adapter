@@ -12,6 +12,7 @@ type MinuteStats struct {
 	Success      int        `json:"success"`
 	Errors       int        `json:"errors"`
 	StatusCounts map[int]int `json:"status_counts"`
+	TotalLatencyMs int64 `json:"total_latency_ms"`
 }
 
 // HistoryEntry is returned by GetHistory.
@@ -52,7 +53,7 @@ func NewStats() *Stats {
 }
 
 // Record adds a request result to the current minute.
-func (s *Stats) Record(status int) {
+func (s *Stats) Record(status int, latencyMs int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -71,6 +72,7 @@ func (s *Stats) Record(status int) {
 
 	s.current.Total++
 	s.current.StatusCounts[status]++
+	s.current.TotalLatencyMs += latencyMs
 	if status >= 200 && status < 400 {
 		s.current.Success++
 	} else {
@@ -147,4 +149,24 @@ func (s *Stats) GetCurrentQPS() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return float64(s.current.Total) / 60.0
+}
+
+// GetErrorRate returns the error rate for the current minute.
+func (s *Stats) GetErrorRate() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.current.Total == 0 {
+		return 0
+	}
+	return float64(s.current.Errors) / float64(s.current.Total)
+}
+
+// GetAvgLatencyMs returns the average latency in ms for the current minute.
+func (s *Stats) GetAvgLatencyMs() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.current.Total == 0 {
+		return 0
+	}
+	return s.current.TotalLatencyMs / int64(s.current.Total)
 }

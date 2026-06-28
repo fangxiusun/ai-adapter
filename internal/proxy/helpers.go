@@ -58,7 +58,7 @@ func (h *ProxyHandler) recordLog(reqID, channelID, clientModel, upstreamModel st
 
 	// Record stats
 	if h.stats != nil {
-		h.stats.Record(status)
+		h.stats.Record(status, latencyMs)
 	}
 
 	// Broadcast via WebSocket

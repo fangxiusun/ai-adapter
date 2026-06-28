@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -30,6 +32,9 @@ var (
 		Name:      "active_requests",
 		Help:      "Number of requests currently being processed",
 	})
+
+	// activeRequestsCount is a simple atomic counter for direct reads.
+	activeRequestsCount atomic.Int64
 
 	// PromptTokensTotal counts total prompt tokens by channel and model.
 	PromptTokensTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -96,3 +101,20 @@ var (
 		Help:      "Total rate-limited responses per key",
 	}, []string{"channel", "key"})
 )
+
+// IncActiveRequests increments both the Prometheus gauge and atomic counter.
+func IncActiveRequests() {
+	ActiveRequests.Inc()
+	activeRequestsCount.Add(1)
+}
+
+// DecActiveRequests decrements both the Prometheus gauge and atomic counter.
+func DecActiveRequests() {
+	ActiveRequests.Dec()
+	activeRequestsCount.Add(-1)
+}
+
+// GetActiveRequests returns the current active request count.
+func GetActiveRequests() int64 {
+	return activeRequestsCount.Load()
+}
