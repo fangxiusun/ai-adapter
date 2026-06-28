@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -157,16 +160,38 @@ func loggingMiddleware(logger *applog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			model := extractModelForLog(r)
 			next.ServeHTTP(w, r)
 			if r.URL.Path != "/admin/api/health" {
 				logger.Debug("http_request",
 					"method", r.Method,
 					"path", r.URL.Path,
+					"model", model,
 					"latency_ms", time.Since(start).Milliseconds(),
 				)
 			}
 		})
 	}
+}
+
+func extractModelForLog(r *http.Request) string {
+	if strings.HasPrefix(r.URL.Path, "/v1beta/models/") {
+		prefix := "/v1beta/models/"
+		rest := strings.TrimPrefix(r.URL.Path, prefix)
+		parts := strings.SplitN(rest, ":", 2)
+		return parts[0]
+	}
+	if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/v1/") {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+		if err != nil {
+			return ""
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var partial struct{ Model string `json:"model"` }
+		json.Unmarshal(body, &partial)
+		return partial.Model
+	}
+	return ""
 }
 
 func corsMiddleware() func(http.Handler) http.Handler {
