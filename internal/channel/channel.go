@@ -235,6 +235,35 @@ func (cm *ChannelManager) SelectChannelCandidates(model string) []*Channel {
 	return nil
 }
 
+// SelectBalanced selects a single channel from candidates using the configured load balance strategy.
+func (cm *ChannelManager) SelectBalanced(candidates []*Channel) *Channel {
+	if len(candidates) == 0 {
+		return nil
+	}
+	return cm.balancer.Select(candidates)
+}
+
+// ReorderCandidates reorders candidates so that the balanced selection comes first,
+// followed by the remaining channels in their original order.
+// This ensures failover starts from the balanced-selected channel.
+func (cm *ChannelManager) ReorderCandidates(candidates []*Channel) []*Channel {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	selected := cm.balancer.Select(candidates)
+	if selected == nil {
+		return candidates
+	}
+	reordered := make([]*Channel, 0, len(candidates))
+	reordered = append(reordered, selected)
+	for _, ch := range candidates {
+		if ch != selected {
+			reordered = append(reordered, ch)
+		}
+	}
+	return reordered
+}
+
 // IsHealthy returns whether the channel is currently available for requests.
 func (ch *Channel) IsHealthy() bool {
 	return ch.health.IsHealthy()

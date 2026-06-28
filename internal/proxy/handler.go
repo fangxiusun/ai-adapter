@@ -216,8 +216,8 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 
 	fc := h.config.Failover
 	if !fc.Enabled || len(candidates) <= 1 {
-		// No failover — use first candidate directly
-		ch := candidates[0]
+		// No failover — use balanced selection
+		ch := h.channels.SelectBalanced(candidates)
 		upstreamModel := clientModel
 		if mi, ok := ch.ResolveModel(clientModel); ok && mi.ID != "" {
 			upstreamModel = mi.ID
@@ -226,6 +226,8 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
+	// Reorder candidates based on load balance strategy (round-robin/random/priority)
+	candidates = h.channels.ReorderCandidates(candidates)
 	deadline := time.Now().Add(time.Duration(fc.TotalTimeoutMs) * time.Millisecond)
 	tried := 0
 	var lastErr *FailoverError
