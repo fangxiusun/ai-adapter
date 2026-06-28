@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
+	"github.com/fangxiusun/ai-adapter/internal/daemon"
 	"github.com/fangxiusun/ai-adapter/internal/db"
 	"github.com/fangxiusun/ai-adapter/internal/debug"
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
@@ -37,6 +38,7 @@ var (
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	deepDebug := flag.Bool("deep-debug", false, "enable deep debug mode: log each request/response to individual files in ./debug_logs/")
+	daemonMode := flag.Bool("daemon", false, "run in background (daemon mode)")
 	flag.Parse()
 
 	// Check AI_ADAPTER_DEEP_DEBUG environment variable
@@ -52,6 +54,20 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Handle daemon mode
+	if *daemonMode && !daemon.IsDaemon() {
+		logFile := ""
+		if cfg.Logging.File != "" {
+			logFile = cfg.Logging.File
+		} else {
+			logFile = daemon.GetDefaultLogFile()
+		}
+		if err := daemon.Daemonize(logFile); err != nil {
+			fmt.Fprintf(os.Stderr, "daemonize: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	logger := applog.New(cfg.Logging.Level, cfg.Logging.File, cfg.Logging.LogRequestBody, cfg.Logging.LogIO)
@@ -251,6 +267,7 @@ func authMiddleware(apiToken string) func(http.Handler) http.Handler {
 		})
 	}
 }
+
 func chainMiddleware(handler http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		handler = middlewares[i](handler)

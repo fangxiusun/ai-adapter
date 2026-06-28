@@ -16,6 +16,7 @@ type Config struct {
 	Failover  FailoverConfig  `yaml:"failover"`
 	Channels []ChannelConfig `yaml:"channels"`
 
+
 	// New simplified format
 	Headers *HeadersConfig `yaml:"headers,omitempty"`
 
@@ -371,4 +372,5 @@ func (ch *ChannelConfig) NativeBaseURL(iface InterfaceType) string {
 	}
 	return ""
 }
+
 
