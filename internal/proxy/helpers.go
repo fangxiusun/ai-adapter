@@ -13,11 +13,20 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/translate"
 )
 
-// sendError writes a JSON error response to the client.
-func (h *ProxyHandler) sendError(w http.ResponseWriter, status int, code, message string) {
+// sendError writes a JSON error response to the client and logs the error.
+func (h *ProxyHandler) sendError(w http.ResponseWriter, reqID string, status int, code, message string) {
 	if status <= 0 {
 		status = 502
 	}
+
+	// Log the error with request context
+	h.logger.Error("api_error",
+		"request_id", reqID,
+		"status", status,
+		"error_code", code,
+		"error_message", message,
+	)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -269,7 +278,3 @@ func applyProcessedHeaders(target http.Header, processed http.Header, preserveKe
 		}
 	}
 }
-
-
-
-

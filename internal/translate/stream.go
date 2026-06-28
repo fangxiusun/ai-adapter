@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -444,6 +445,7 @@ func PipeResponsesStreamToChat(ctx context.Context, upstream io.Reader, sink io.
 
 		var raw map[string]interface{}
 		if err := json.Unmarshal([]byte(data), &raw); err != nil {
+			slog.Warn("sse_parse_failed", "error", err, "data", truncateString(data, 200))
 			continue
 		}
 
@@ -536,4 +538,13 @@ func PipeResponsesStreamToChat(ctx context.Context, upstream io.Reader, sink io.
 		},
 		Usage: usage,
 	}, nil
+}
+
+
+// truncateString truncates a string to maxLength and adds "..." if truncated.
+func truncateString(s string, maxLength int) string {
+	if len(s) <= maxLength {
+		return s
+	}
+	return s[:maxLength] + "..."
 }

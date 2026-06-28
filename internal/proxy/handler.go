@@ -37,6 +37,40 @@ func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *
 	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug, headerEngine: headerEngine, stats: statsInstance, wsHub: hub}
 }
 
+// maxRequestBodyBytes returns the maximum allowed request body size in bytes.
+func (h *ProxyHandler) maxRequestBodyBytes() int64 {
+	mb := h.config.Server.MaxRequestBodySizeMB
+	if mb <= 0 {
+		mb = 64 // default 64MB
+	}
+	return int64(mb) * 1024 * 1024
+}
+
+// readRequestBody reads the request body with size limit and logs truncation warnings.
+func (h *ProxyHandler) readRequestBody(w http.ResponseWriter, reqID string, r *http.Request) ([]byte, error) {
+	maxSize := h.maxRequestBodyBytes()
+	// Use LimitReader to enforce max size (+1 to detect truncation)
+	limitedReader := io.LimitReader(r.Body, maxSize+1)
+	body, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if body was truncated
+	if int64(len(body)) > maxSize {
+		h.logger.Warn("request_body_truncated",
+			"request_id", reqID,
+			"original_size_hint", fmt.Sprintf(">%dMB", maxSize/1024/1024),
+			"truncated_size", len(body),
+			"max_allowed", maxSize,
+		)
+		// Return truncated body (first maxSize bytes)
+		return body[:maxSize], nil
+	}
+
+	return body, nil
+}
+
 // ==================== Entry Points ====================
 
 func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
@@ -45,9 +79,9 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	reqID := generateRequestID()
 	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/chat/completions", "target", "chat")
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
+	body, err := h.readRequestBody(w, reqID, r)
 	if err != nil {
-		h.sendError(w, 400, "read_body_failed", err.Error())
+		h.sendError(w, reqID, 400, "read_body_failed", err.Error())
 		return
 	}
 	body = stripUTF8BOM(body)
@@ -59,16 +93,16 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	defer deepLog.Close()
 	var req translate.ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		h.sendError(w, 400, "invalid_json", err.Error())
+		h.sendError(w, reqID, 400, "invalid_json", err.Error())
 		return
 	}
 	if req.Model == "" {
-		h.sendError(w, 400, "missing_model", "model is required")
+		h.sendError(w, reqID, 400, "missing_model", "model is required")
 		return
 	}
 	candidates := h.channels.SelectChannelCandidates(req.Model)
 	if len(candidates) == 0 {
-		h.sendError(w, 404, "no_channel", "no channel found for model: "+req.Model)
+		h.sendError(w, reqID, 404, "no_channel", "no channel found for model: "+req.Model)
 		return
 	}
 	h.failoverLoop(w, r, reqID, candidates, config.InterfaceChat, req.Model, req.Stream, body, &req, deepLog)
@@ -80,9 +114,9 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 
 	reqID := generateRequestID()
 	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/responses", "target", "responses")
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
+	body, err := h.readRequestBody(w, reqID, r)
 	if err != nil {
-		h.sendError(w, 400, "read_body_failed", err.Error())
+		h.sendError(w, reqID, 400, "read_body_failed", err.Error())
 		return
 	}
 	body = stripUTF8BOM(body)
@@ -94,16 +128,16 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	defer deepLog.Close()
 	var req translate.ResponsesRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		h.sendError(w, 400, "invalid_json", err.Error())
+		h.sendError(w, reqID, 400, "invalid_json", err.Error())
 		return
 	}
 	if req.Model == "" {
-		h.sendError(w, 400, "missing_model", "model is required")
+		h.sendError(w, reqID, 400, "missing_model", "model is required")
 		return
 	}
 	candidates := h.channels.SelectChannelCandidates(req.Model)
 	if len(candidates) == 0 {
-		h.sendError(w, 404, "no_channel", "no channel found for model: "+req.Model)
+		h.sendError(w, reqID, 404, "no_channel", "no channel found for model: "+req.Model)
 		return
 	}
 	h.failoverLoop(w, r, reqID, candidates, config.InterfaceResponses, req.Model, req.Stream, body, &req, deepLog)
@@ -115,9 +149,9 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 
 	reqID := generateRequestID()
 	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/messages", "target", "messages")
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
+	body, err := h.readRequestBody(w, reqID, r)
 	if err != nil {
-		h.sendError(w, 400, "read_body_failed", err.Error())
+		h.sendError(w, reqID, 400, "read_body_failed", err.Error())
 		return
 	}
 	body = stripUTF8BOM(body)
@@ -129,16 +163,16 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	defer deepLog.Close()
 	var req translate.ClaudeRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		h.sendError(w, 400, "invalid_json", err.Error())
+		h.sendError(w, reqID, 400, "invalid_json", err.Error())
 		return
 	}
 	if req.Model == "" {
-		h.sendError(w, 400, "missing_model", "model is required")
+		h.sendError(w, reqID, 400, "missing_model", "model is required")
 		return
 	}
 	candidates := h.channels.SelectChannelCandidates(req.Model)
 	if len(candidates) == 0 {
-		h.sendError(w, 404, "no_channel", "no channel found for model: "+req.Model)
+		h.sendError(w, reqID, 404, "no_channel", "no channel found for model: "+req.Model)
 		return
 	}
 	h.failoverLoop(w, r, reqID, candidates, config.InterfaceMessages, req.Model, req.Stream, body, &req, deepLog)
@@ -149,16 +183,15 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 	defer metrics.DecActiveRequests()
 
 	reqID := generateRequestID()
+	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1beta/models/*:generateContent", "target", "generateContent")
 	model := extractGeminiModel(r.URL.Path)
-	stream := strings.Contains(r.URL.Path, "streamGenerateContent")
-	h.logger.Debug("incoming request", "request_id", reqID, "path", r.URL.Path, "target", "generate_content", "model", model, "stream", stream)
 	if model == "" {
-		h.sendError(w, 400, "missing_model", "could not extract model from URL path")
+		h.sendError(w, reqID, 400, "missing_model", "could not extract model from URL path")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
+	body, err := h.readRequestBody(w, reqID, r)
 	if err != nil {
-		h.sendError(w, 400, "read_body_failed", err.Error())
+		h.sendError(w, reqID, 400, "read_body_failed", err.Error())
 		return
 	}
 	body = stripUTF8BOM(body)
@@ -168,14 +201,15 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 	deepLog.LogClientRequestHeader(r)
 	deepLog.LogClientRequestBody(body)
 	defer deepLog.Close()
+	stream := strings.Contains(r.URL.Path, "streamGenerateContent")
 	var req translate.GeminiRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		h.sendError(w, 400, "invalid_json", err.Error())
+		h.sendError(w, reqID, 400, "invalid_json", err.Error())
 		return
 	}
 	candidates := h.channels.SelectChannelCandidates(model)
 	if len(candidates) == 0 {
-		h.sendError(w, 404, "no_channel", "no channel found for model: "+model)
+		h.sendError(w, reqID, 404, "no_channel", "no channel found for model: "+model)
 		return
 	}
 	h.failoverLoop(w, r, reqID, candidates, config.InterfaceGenerateContent, model, stream, body, &req, deepLog)
@@ -186,7 +220,7 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, model string, stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
 	source, ok := config.BestSourceForTarget(target, &ch.Config)
 	if !ok {
-		h.sendError(w, 503, "no_conversion_path",
+		h.sendError(w, reqID, 503, "no_conversion_path",
 			fmt.Sprintf("channel %s has no native interface and no conversion path to %s", ch.Config.ID, target))
 		return nil
 	}
@@ -196,7 +230,7 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 	}
 	chatReq, err := h.buildChatRequest(target, targetReq, model, stream)
 	if err != nil {
-		h.sendError(w, 400, "convert_failed", err.Error())
+		h.sendError(w, reqID, 400, "convert_failed", err.Error())
 		return nil
 	}
 	if stream {
@@ -271,10 +305,10 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 
 	// All channels failed
 	if lastErr != nil {
-		h.sendError(w, lastErr.StatusCode, "all_channels_failed",
+		h.sendError(w, reqID, lastErr.StatusCode, "all_channels_failed",
 			fmt.Sprintf("all %d channels failed, last error: %s", tried, lastErr.Message))
 	} else {
-		h.sendError(w, 503, "no_healthy_channel", "no healthy channels available")
+		h.sendError(w, reqID, 503, "no_healthy_channel", "no healthy channels available")
 	}
 }
 
@@ -297,13 +331,3 @@ func (h *ProxyHandler) buildChatRequest(target config.InterfaceType, targetReq i
 		return nil, fmt.Errorf("unsupported target: %s", target)
 	}
 }
-
-
-
-
-
-
-
-
-
-

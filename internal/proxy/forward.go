@@ -101,7 +101,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		url := ch.Config.NativeBaseURL(iface) + path
 		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(body))
 		if err != nil {
-			h.sendError(w, 500, "create_request_failed", err.Error())
+			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
 			return nil
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -115,6 +115,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "connection_error")
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
@@ -125,6 +126,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, 401)
 			rs.excluded[key.Value] = true
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "unauthorized", "status", 401)
 			rs.consecFails = 0
 			continue
 		}
@@ -132,6 +134,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, 429)
 			rs.excluded[key.Value] = true
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "rate_limited", "status", 429)
 			time.Sleep(rs.retryDelay)
 			continue
 		}
@@ -139,6 +142,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
@@ -155,7 +159,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 				"status", 400,
 				"upstream_body", string(errBodyBytes),
 			)
-			h.sendError(w, 400, "bad_request", string(errBodyBytes))
+			h.sendError(w, reqID, 400, "bad_request", string(errBodyBytes))
 			return nil
 		}
 		if resp.StatusCode >= 400 {
@@ -218,12 +222,12 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
 	sourceReq, err := convertChatToSource(source, chatReq)
 	if err != nil {
-		h.sendError(w, 400, "convert_to_source_failed", err.Error())
+		h.sendError(w, reqID, 400, "convert_to_source_failed", err.Error())
 		return nil
 	}
 	sourceBody, err := json.Marshal(sourceReq)
 	if err != nil {
-		h.sendError(w, 500, "marshal_source_failed", err.Error())
+		h.sendError(w, reqID, 500, "marshal_source_failed", err.Error())
 		return nil
 	}
 
@@ -250,7 +254,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		url := ch.Config.NativeBaseURL(source) + path
 		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
-			h.sendError(w, 500, "create_request_failed", err.Error())
+			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
 			return nil
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -266,6 +270,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "connection_error")
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
@@ -283,12 +288,14 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if resp.StatusCode == 429 {
 			ch.ReportError(key.Value, 429)
 			rs.excluded[key.Value] = true
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "rate_limited", "status", 429)
 			time.Sleep(rs.retryDelay)
 			continue
 		}
 		if resp.StatusCode >= 500 {
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
@@ -298,7 +305,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if resp.StatusCode == 400 {
 			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			ch.ReportError(key.Value, 400)
-			h.sendError(w, 400, "bad_request", string(errBodyBytes))
+			h.sendError(w, reqID, 400, "bad_request", string(errBodyBytes))
 			return nil
 		}
 		if resp.StatusCode >= 400 {
@@ -330,12 +337,12 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 	}
 	chatResp, err := convertSourceToChat(source, result.Body, chatReq)
 	if err != nil {
-		h.sendError(w, 502, "convert_from_source_failed", err.Error())
+		h.sendError(w, reqID, 502, "convert_from_source_failed", err.Error())
 		return nil
 	}
 	targetResp, err := convertChatToTarget(target, chatResp, targetReq)
 	if err != nil {
-		h.sendError(w, 500, "convert_to_target_failed", err.Error())
+		h.sendError(w, reqID, 500, "convert_to_target_failed", err.Error())
 		return nil
 	}
 	deepLog.LogClientResponseHeader(200, w.Header())
@@ -358,4 +365,15 @@ func (h *ProxyHandler) convertedStreamForward(w http.ResponseWriter, r *http.Req
 	return h.streamChainConversion(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
 }
 
+
+
+
+
+// maskKey masks the API key for safe logging, showing only first 4 and last 4 characters.
+func maskKey(key string) string {
+	if len(key) <= 8 {
+		return "***"
+	}
+	return key[:4] + "***" + key[len(key)-4:]
+}
 

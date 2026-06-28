@@ -2,6 +2,8 @@ server:
   host: "0.0.0.0"
   port: 8080
   api_token: ""
+  # Maximum request body size in MB (default: 64). Requests larger than this will be truncated.
+  # max_request_body_size_mb: 64
 
 logging:
   level: "info"
@@ -174,4 +176,3 @@ channels:
       consec_error_threshold: 3
       pause_multiplier_sec: 30
       pause_max_sec: 600
-

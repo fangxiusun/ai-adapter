@@ -99,7 +99,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 	injectedReq.StreamOptions = &translate.StreamOptions{IncludeUsage: true}
 	sourceBody, err := json.Marshal(&injectedReq)
 	if err != nil {
-		h.sendError(w, 500, "marshal_failed", err.Error())
+		h.sendError(w, reqID, 500, "marshal_failed", err.Error())
 		return nil
 	}
 	path := upstreamPathForInterface(config.InterfaceChat, model, true)
@@ -121,7 +121,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		url := ch.Config.NativeBaseURL(config.InterfaceChat) + path
 		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
-			h.sendError(w, 500, "create_request_failed", err.Error())
+			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
 			return nil
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -169,7 +169,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, 400)
-			h.sendError(w, 400, "bad_request", string(errBodyBytes))
+			h.sendError(w, reqID, 400, "bad_request", string(errBodyBytes))
 			return nil
 		}
 		if resp.StatusCode >= 400 {
@@ -230,12 +230,12 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
 	sourceReq, err := convertChatToSource(source, chatReq)
 	if err != nil {
-		h.sendError(w, 400, "convert_to_source_failed", err.Error())
+		h.sendError(w, reqID, 400, "convert_to_source_failed", err.Error())
 		return nil
 	}
 	sourceBody, err := json.Marshal(sourceReq)
 	if err != nil {
-		h.sendError(w, 500, "marshal_source_failed", err.Error())
+		h.sendError(w, reqID, 500, "marshal_source_failed", err.Error())
 		return nil
 	}
 	path := upstreamPathForInterface(source, model, true)
@@ -255,7 +255,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		url := ch.Config.NativeBaseURL(source) + path
 		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
-			h.sendError(w, 500, "create_request_failed", err.Error())
+			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
 			return nil
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -303,7 +303,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, 400)
-			h.sendError(w, 400, "bad_request", string(errBodyBytes))
+			h.sendError(w, reqID, 400, "bad_request", string(errBodyBytes))
 			return nil
 		}
 		if resp.StatusCode >= 400 {
@@ -535,4 +535,5 @@ func (h *ProxyHandler) emitGeminiStreamResponse(w io.Writer, chatResp *translate
 		flusher()
 	}
 }
+
 

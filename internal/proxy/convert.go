@@ -31,30 +31,38 @@ func convertSourceToChat(source config.InterfaceType, body []byte, chatReq *tran
 	case config.InterfaceChat:
 		var resp translate.ChatResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("unmarshal chat response: %w", err)
+			return nil, fmt.Errorf("unmarshal chat response: %w (body preview: %s)", err, truncateBody(body, 1024))
 		}
 		return &resp, nil
 	case config.InterfaceResponses:
 		var resp translate.ResponsesObject
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("unmarshal responses response: %w", err)
+			return nil, fmt.Errorf("unmarshal responses response: %w (body preview: %s)", err, truncateBody(body, 1024))
 		}
 		return translate.RespToChat(&resp, chatReq, translate.TranslateOpts{}), nil
 	case config.InterfaceMessages:
 		var resp translate.ClaudeResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("unmarshal claude response: %w", err)
+			return nil, fmt.Errorf("unmarshal claude response: %w (body preview: %s)", err, truncateBody(body, 1024))
 		}
 		return translate.ClaudeToChatResponse(&resp), nil
 	case config.InterfaceGenerateContent:
 		var resp translate.GeminiResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("unmarshal gemini response: %w", err)
+			return nil, fmt.Errorf("unmarshal gemini response: %w (body preview: %s)", err, truncateBody(body, 1024))
 		}
 		return translate.GeminiToChatResponse(&resp), nil
 	default:
 		return nil, fmt.Errorf("unsupported source interface: %s", source)
 	}
+}
+
+// truncateBody truncates a byte slice to maxLen and converts to string for logging.
+func truncateBody(body []byte, maxLen int) string {
+	if len(body) <= maxLen {
+		return string(body)
+	}
+	return string(body[:maxLen]) + "...(truncated)"
 }
 
 // convertChatToTarget converts a ChatResponse to the target interface format.
@@ -87,7 +95,6 @@ func extractGeminiModel(path string) string {
 	parts := strings.SplitN(rest, ":", 2)
 	return parts[0]
 }
-
 
 // upstreamPathForInterface returns the URL path for calling the upstream interface.
 func upstreamPathForInterface(iface config.InterfaceType, model string, stream bool) string {

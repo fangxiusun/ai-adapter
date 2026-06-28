@@ -25,9 +25,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host     string `yaml:"host" json:"host"`
-	Port     int    `yaml:"port" json:"port"`
-	APIToken string `yaml:"api_token" json:"api_token"`
+	Host                 string `yaml:"host" json:"host"`
+	Port                 int    `yaml:"port" json:"port"`
+	APIToken             string `yaml:"api_token" json:"api_token"`
+	MaxRequestBodySizeMB int    `yaml:"max_request_body_size_mb" json:"max_request_body_size_mb"`
 }
 
 type LoggingConfig struct {
@@ -193,6 +194,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Logging.MaxBackups == 0 {
 		c.Logging.MaxBackups = 3
+	}
+	if c.Server.MaxRequestBodySizeMB == 0 {
+		c.Server.MaxRequestBodySizeMB = 64
 	}
 	for i := range c.Channels {
 		ch := &c.Channels[i]
