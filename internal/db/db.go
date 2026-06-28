@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fangxiusun/ai-adapter/internal/util"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -67,7 +69,6 @@ func (db *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_channel ON request_logs(channel_id, timestamp DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_status ON request_logs(status_code, timestamp DESC)`,
-		`DROP TABLE IF EXISTS key_stats`,
 		`CREATE TABLE IF NOT EXISTS key_stats (
 			channel_id TEXT NOT NULL,
 			key_name TEXT NOT NULL,
@@ -110,15 +111,15 @@ func (db *DB) migrate() error {
 	return nil
 }
 
-func (db *DB) InsertLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string) {
+func (db *DB) InsertLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	_, err := db.conn.Exec(
 		`INSERT INTO request_logs (request_id, timestamp, channel_id, client_api, upstream_api, model, status_code, latency_ms, key_name, error_code, error_message, prompt_tokens, completion_tokens, total_tokens, usage_json)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		reqID, time.Now().UnixMilli(), channelID, "responses", "chat",
-		upstreamModel, status, latencyMs, maskKey(key), errorCode, errorMsg,
+		reqID, time.Now().UnixMilli(), channelID, clientAPI, upstreamAPI,
+		upstreamModel, status, latencyMs, util.MaskKey(key), errorCode, errorMsg,
 		promptTokens, completionTokens, totalTokens, usageJSON,
 	)
 	if err != nil {
@@ -358,12 +359,6 @@ func (db *DB) SaveKeyStatsBatch(rows []KeyStatsRow) error {
 	return tx.Commit()
 }
 
-func maskKey(key string) string {
-	if len(key) <= 8 {
-		return "***"
-	}
-	return key[:4] + "***" + key[len(key)-4:]
-}
 
 // QueryLogByRequestID queries a single log entry by request_id.
 func (db *DB) QueryLogByRequestID(requestID string) (*LogEntry, error) {

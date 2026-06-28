@@ -19,6 +19,7 @@ type Hub struct {
 	broadcastCh chan Message
 	register    chan *websocket.Conn
 	unregister  chan *websocket.Conn
+	done        chan struct{}
 }
 
 // Message represents a WebSocket message.
@@ -34,6 +35,7 @@ func NewHub() *Hub {
 		broadcastCh: make(chan Message, 256),
 		register:    make(chan *websocket.Conn),
 		unregister:  make(chan *websocket.Conn),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -41,6 +43,14 @@ func NewHub() *Hub {
 func (h *Hub) Run() {
 	for {
 		select {
+		case <-h.done:
+			h.mu.Lock()
+			for conn := range h.clients {
+				conn.Close()
+			}
+			h.clients = make(map[*websocket.Conn]bool)
+			h.mu.Unlock()
+			return
 		case conn := <-h.register:
 			h.mu.Lock()
 			h.clients[conn] = true
@@ -87,6 +97,11 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+}
+
+// Stop gracefully shuts down the Hub, closing all client connections.
+func (h *Hub) Stop() {
+	close(h.done)
 }
 
 // StartHeartbeat sends periodic heartbeat messages.

@@ -86,7 +86,7 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	}
 
 	pt, ct, tt, usageJSON := capture.Usage()
-	h.recordLog(reqID, ch.Config.ID, model, model, 200, time.Since(start).Milliseconds(), result.Key, "", "", pt, ct, tt, usageJSON, string(target))
+	h.recordLog(reqID, ch.Config.ID, string(target), string(target), model, model, 200, time.Since(start).Milliseconds(), result.Key, "", "", pt, ct, tt, usageJSON, string(target))
 	h.logger.LogRequest(reqID, "POST", path, 200, time.Since(start).Milliseconds(), result.Key, ch.Config.ID, model)
 	return nil
 }
@@ -221,7 +221,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		pt, ct, tt, usageJSON := capture.Usage()
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
+		h.recordLog(reqID, ch.Config.ID, string(target), string(config.InterfaceChat), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return nil
 	}
@@ -350,7 +350,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(200)
 		h.emitStreamResponse(w, target, chatResp, chatReq, targetReq, flusher)
 		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
+		h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return nil
 	}

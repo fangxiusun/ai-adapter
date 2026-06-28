@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"bytes"
@@ -115,7 +115,7 @@ func main() {
 	channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database, cfg.Failover.LoadBalance)
 	headerEngine := headerpolicy.NewEngine(cfg)
 	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger, headerEngine, statsInstance, wsHub)
-	webHandler := web.NewWebHandler(channels, database, cfg, statsInstance, wsHub)
+	webHandler := web.NewWebHandler(channels, database, cfg, statsInstance, wsHub, version)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", proxyHandler.HandleChat)
@@ -130,6 +130,7 @@ func main() {
 		loggingMiddleware(logger),
 		corsMiddleware(),
 		authMiddleware(cfg.Server.APIToken),
+		adminAuthMiddleware(cfg.Server.AdminToken),
 	)
 
 	server := &http.Server{
@@ -170,6 +171,7 @@ func main() {
 	<-quit
 
 	logger.Info("shutting down")
+	wsHub.Stop()
 	channels.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -273,6 +275,41 @@ func authMiddleware(apiToken string) func(http.Handler) http.Handler {
 	}
 }
 
+
+func adminAuthMiddleware(adminToken string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Only protect /admin/api/ routes
+			if !strings.HasPrefix(r.URL.Path, "/admin/api/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// If no admin token configured, fall back to API token
+			token := adminToken
+			if token == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Check Authorization header
+			auth := r.Header.Get("Authorization")
+			const prefix = "Bearer "
+			if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
+				if auth[len(prefix):] == token {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			// Check X-Admin-Token header
+			if r.Header.Get("X-Admin-Token") == token {
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(401)
+			fmt.Fprint(w, `{"error":{"type":"authentication_error","code":"unauthorized","message":"invalid or missing admin token"}}`)
+		})
+	}
+}
 func chainMiddleware(handler http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		handler = middlewares[i](handler)

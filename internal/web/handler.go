@@ -24,9 +24,10 @@ type WebHandler struct {
 	config   *config.Config
 	stats    *stats.Stats
 	wsHub    *websocket.Hub
+	version  string
 }
-func NewWebHandler(channels *channel.ChannelManager, database *db.DB, cfg *config.Config, statsInstance *stats.Stats, hub *websocket.Hub) *WebHandler {
-	return &WebHandler{channels: channels, db: database, config: cfg, stats: statsInstance, wsHub: hub}
+func NewWebHandler(channels *channel.ChannelManager, database *db.DB, cfg *config.Config, statsInstance *stats.Stats, hub *websocket.Hub, version string) *WebHandler {
+	return &WebHandler{channels: channels, db: database, config: cfg, stats: statsInstance, wsHub: hub, version: version}
 }
 
 func (h *WebHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -48,7 +49,7 @@ func (h *WebHandler) RegisterRoutes(mux *http.ServeMux) {
 func (h *WebHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	h.json(w, 200, map[string]interface{}{
 		"ok":      true,
-		"version": "1.0.0",
+		"version": h.version,
 	})
 }
 

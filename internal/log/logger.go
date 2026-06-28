@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/fangxiusun/ai-adapter/internal/util"
 	"sync"
 	"time"
 
@@ -175,7 +177,7 @@ func (l *Logger) LogRequest(reqID, method, path string, status int, latencyMs in
 		"path", path,
 		"status", status,
 		"latency_ms", latencyMs,
-		"key", maskKey(key),
+		"key", util.MaskKey(key),
 		"channel", channel,
 		"model", model,
 	)
@@ -246,14 +248,14 @@ func (l *Logger) LogSSEDelta(reqID string, deltaType string, content string) {
 func (l *Logger) LogKeyPaused(channel, key string, consecErrors int, pauseUntil time.Time) {
 	l.Warn("key_paused",
 		"channel", channel,
-		"key", maskKey(key),
+		"key", util.MaskKey(key),
 		"consec_errors", consecErrors,
 		"pause_until", pauseUntil.Format(time.RFC3339),
 	)
 }
 
 func (l *Logger) LogKeyResumed(channel, key string) {
-	l.Info("key_resumed", "channel", channel, "key", maskKey(key))
+	l.Info("key_resumed", "channel", channel, "key", util.MaskKey(key))
 }
 
 func (l *Logger) LogTranslate(direction string, toolsMapped, toolsDropped int) {
@@ -297,12 +299,6 @@ func parseLevel(s string) slog.Level {
 	}
 }
 
-func maskKey(key string) string {
-	if len(key) <= 8 {
-		return "***"
-	}
-	return key[:4] + "***" + key[len(key)-4:]
-}
 
 func prettyJSON(data []byte) string {
 	if len(data) == 0 {

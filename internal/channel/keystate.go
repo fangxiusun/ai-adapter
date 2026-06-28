@@ -56,15 +56,22 @@ func (ks *KeyState) IsAvailable() bool {
 	if ks.PermanentlySkipped {
 		return false
 	}
-	if ks.Paused && time.Now().Before(ks.PauseUntil) {
-		return false
-	}
-	if ks.Paused && time.Now().After(ks.PauseUntil) {
-		ks.mu.RUnlock()
-		ks.ResetPause()
-		ks.mu.RLock()
+	if ks.Paused {
+		if time.Now().Before(ks.PauseUntil) {
+			return false
+		}
+		// Pause expired -- caller should invoke ResetPause() after releasing read lock.
+		return true
 	}
 	return true
+}
+
+// IsPauseExpired returns true if the key is paused but the pause window has elapsed.
+// The caller should invoke ResetPause() to clear the pause state.
+func (ks *KeyState) IsPauseExpired() bool {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.Paused && time.Now().After(ks.PauseUntil)
 }
 
 func (ks *KeyState) OnSuccess() {

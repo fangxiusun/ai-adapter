@@ -12,6 +12,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
+	"github.com/fangxiusun/ai-adapter/internal/util"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
 )
 
@@ -65,7 +66,7 @@ func (h *ProxyHandler) fanoutForward(w http.ResponseWriter, r *http.Request, req
 	deepLog.LogClientResponseHeader(result.StatusCode, w.Header())
 	deepLog.LogClientResponseBody(result.Response)
 
-	h.recordLog(reqID, ch.Config.ID, model, model, result.StatusCode, latency, result.Key, "", "", pt, ct, tt, usageJSON, string(iface))
+	h.recordLog(reqID, ch.Config.ID, string(iface), string(iface), model, model, result.StatusCode, latency, result.Key, "", "", pt, ct, tt, usageJSON, string(iface))
 	h.logger.LogRequest(reqID, "POST", path, result.StatusCode, latency, result.Key, ch.Config.ID, model)
 	return nil
 }
@@ -115,7 +116,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "connection_error")
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "connection_error")
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
@@ -126,7 +127,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, 401)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "unauthorized", "status", 401)
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "unauthorized", "status", 401)
 			rs.consecFails = 0
 			continue
 		}
@@ -134,7 +135,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, 429)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "rate_limited", "status", 429)
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "rate_limited", "status", 429)
 			time.Sleep(rs.retryDelay)
 			continue
 		}
@@ -142,7 +143,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
@@ -150,7 +151,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			continue
 		}
 		if resp.StatusCode == 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
 			resp.Body.Close()
 			ch.ReportError(key.Value, 400)
 			h.logger.Warn("upstream_400",
@@ -163,7 +164,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			return nil
 		}
 		if resp.StatusCode >= 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
@@ -195,7 +196,10 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			io.Copy(w, capture)
 			pt, ct, tt, usageJSON = capture.Usage()
 		} else {
-			respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
+		if readErr != nil {
+			h.logger.Warn("upstream_body_read_error", "request_id", reqID, "channel", ch.Config.ID, "error", readErr)
+		}
 			deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 			deepLog.LogUpstreamResponseBody(respBody)
 			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
@@ -211,7 +215,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		resp.Body.Close()
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
-		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(iface))
+		h.recordLog(reqID, ch.Config.ID, string(iface), string(iface), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(iface))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return nil
 	}
@@ -270,14 +274,17 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "connection_error")
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "connection_error")
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
 			}
 			continue
 		}
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
+		if readErr != nil {
+			h.logger.Warn("upstream_body_read_error", "request_id", reqID, "channel", ch.Config.ID, "error", readErr)
+		}
 		resp.Body.Close()
 		latency := time.Since(start).Milliseconds()
 		if resp.StatusCode == 401 {
@@ -288,14 +295,14 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if resp.StatusCode == 429 {
 			ch.ReportError(key.Value, 429)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "rate_limited", "status", 429)
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "rate_limited", "status", 429)
 			time.Sleep(rs.retryDelay)
 			continue
 		}
 		if resp.StatusCode >= 500 {
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", maskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
+			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
@@ -303,13 +310,13 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 			continue
 		}
 		if resp.StatusCode == 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes := respBody
 			ch.ReportError(key.Value, 400)
 			h.sendError(w, reqID, 400, "bad_request", string(errBodyBytes))
 			return nil
 		}
 		if resp.StatusCode >= 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes := respBody
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
 			rs.consecFails = 0
@@ -351,7 +358,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 	w.WriteHeader(200)
 	json.NewEncoder(w).Encode(targetResp)
 	pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
-	h.recordLog(reqID, ch.Config.ID, model, model, 200, result.LatencyMs, result.Key.Value, "", "", pt, ct, tt, usageJSON, string(target))
+	h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, result.LatencyMs, result.Key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 	h.logger.LogRequest(reqID, "POST", logPath, 200, result.LatencyMs, result.Key.Value, ch.Config.ID, model)
 	return nil
 }

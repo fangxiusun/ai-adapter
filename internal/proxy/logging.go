@@ -31,7 +31,7 @@ type sseCapturingWriter struct {
 	reqID      string
 	logger     *log.Logger
 	buf        bytes.Buffer
-	eventStart bool
+	lastEvent string
 }
 
 func (w *sseCapturingWriter) Write(b []byte) (int, error) {
@@ -40,19 +40,19 @@ func (w *sseCapturingWriter) Write(b []byte) (int, error) {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "event: ") {
-			w.eventStart = true
+			w.lastEvent = strings.TrimPrefix(line, "event: ")
 		} else if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
 				w.logger.LogSSEEvent(w.reqID, "DONE", []byte(`"done"`))
 			} else {
 				event := "message"
-				if w.eventStart {
-					event = "delta"
+				if w.lastEvent != "" {
+					event = w.lastEvent
 				}
 				w.logger.LogSSEEvent(w.reqID, event, []byte(data))
 			}
-			w.eventStart = false
+			w.lastEvent = ""
 		}
 	}
 	return w.ResponseWriter.Write(b)

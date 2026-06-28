@@ -46,6 +46,12 @@ func (h *ProxyHandler) maxRequestBodyBytes() int64 {
 	return int64(mb) * 1024 * 1024
 }
 
+// maxResponseBodyBytes returns the maximum allowed upstream response body size in bytes.
+// Uses the same config as request body size.
+func (h *ProxyHandler) maxResponseBodyBytes() int64 {
+	return h.maxRequestBodyBytes()
+}
+
 // readRequestBody reads the request body with size limit and logs truncation warnings.
 func (h *ProxyHandler) readRequestBody(w http.ResponseWriter, reqID string, r *http.Request) ([]byte, error) {
 	maxSize := h.maxRequestBodyBytes()

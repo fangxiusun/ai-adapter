@@ -62,48 +62,50 @@ func NewKeyPool(keyCfgs []config.KeyConfig, strategy, channelID string, logger *
 
 func (kp *KeyPool) Next() *KeyEntry {
 	kp.mu.RLock()
-	defer kp.mu.RUnlock()
 
 	var available []*KeyEntry
+	var hasExpiredPaused bool
 	for _, k := range kp.keys {
 		if k.State.IsAvailable() {
 			available = append(available, k)
+		} else if k.State.IsPauseExpired() {
+			hasExpiredPaused = true
 		}
 	}
+	kp.mu.RUnlock()
 
-	if len(available) == 0 {
+	// If no available keys but some have expired pauses, reset them under write lock.
+	if len(available) == 0 && hasExpiredPaused {
+		kp.mu.Lock()
 		allSkipped := true
 		for _, k := range kp.keys {
 			if !k.State.PermanentlySkipped {
 				allSkipped = false
-				break
-			}
-		}
-		if allSkipped {
-			return nil
-		}
-		kp.mu.RUnlock()
-		kp.mu.Lock()
-		for _, k := range kp.keys {
-			if !k.State.PermanentlySkipped {
 				k.State.ResetPause()
 			}
 		}
 		kp.mu.Unlock()
+		if allSkipped {
+			return nil
+		}
+		// Re-scan under read lock.
 		kp.mu.RLock()
 		for _, k := range kp.keys {
 			if k.State.IsAvailable() {
 				available = append(available, k)
 			}
 		}
-		if len(available) == 0 {
-			return nil
-		}
 		kp.mu.RUnlock()
-		kp.mu.RLock()
 	}
 
-	switch kp.strategy {
+	if len(available) == 0 {
+		return nil
+	}
+
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+
+		switch kp.strategy {
 	case "random":
 		return available[rand.Intn(len(available))]
 	case "least-errors":

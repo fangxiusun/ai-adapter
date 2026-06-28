@@ -36,9 +36,9 @@ func (h *ProxyHandler) sendError(w http.ResponseWriter, reqID string, status int
 
 // recordLog inserts a request log entry into the database with usage data
 // and records Prometheus metrics.
-func (h *ProxyHandler) recordLog(reqID, channelID, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string, apiType string) {
+func (h *ProxyHandler) recordLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string, apiType string) {
 	if h.db != nil {
-		h.db.InsertLog(reqID, channelID, clientModel, upstreamModel, status, latencyMs, key, errorCode, errorMsg, promptTokens, completionTokens, totalTokens, usageJSON)
+		h.db.InsertLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, upstreamModel, status, latencyMs, key, errorCode, errorMsg, promptTokens, completionTokens, totalTokens, usageJSON)
 	}
 
 	// Prometheus metrics
