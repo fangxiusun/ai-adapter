@@ -15,12 +15,73 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/translate"
 )
 
+// ==================== Fanout Forwarding ====================
+
+
+// fanoutForward sends the same request to multiple keys concurrently and returns
+// the first successful (or fastest) response. Only for non-streaming requests.
+func (h *ProxyHandler) fanoutForward(w http.ResponseWriter, r *http.Request, reqID string,
+	ch *channel.Channel, iface config.InterfaceType, body []byte, model string, deepLog *debuglog.RequestLog) *FailoverError {
+
+	path := upstreamPathForInterface(iface, model, false)
+	url := ch.Config.NativeBaseURL(iface) + path
+
+	// Build headers for the fanout request.
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+	if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
+		applyProcessedHeaders(headers, processed, "Content-Type", "Authorization")
+	}
+
+	deepLog.LogUpstreamRequestHeader("POST", url, headers)
+	deepLog.LogUpstreamRequestBody(body)
+
+	start := time.Now()
+	result := ch.Fanout(r.Context(), channel.FanoutRequest{
+		Body:    body,
+		URL:     url,
+		Headers: headers,
+	})
+	latency := time.Since(start).Milliseconds()
+
+	if result.Error != nil {
+		h.logger.Warn("fanout_failed", "request_id", reqID, "channel", ch.Config.ID, "error", result.Error)
+		return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: fanout failed: %s", ch.Config.ID, result.Error)}
+	}
+
+	// Success
+	ch.RecordLatency(result.Key, latency)
+	pt, ct, tt, usageJSON := extractUsageFromRawBody(iface, result.Response)
+
+	if processed := h.processResponseHeaders(ch, model, nil); processed != nil {
+		applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(result.StatusCode)
+	w.Write(result.Response)
+
+	deepLog.LogUpstreamResponseHeader(result.StatusCode, nil)
+	deepLog.LogUpstreamResponseBody(result.Response)
+	deepLog.LogClientResponseHeader(result.StatusCode, w.Header())
+	deepLog.LogClientResponseBody(result.Response)
+
+	h.recordLog(reqID, ch.Config.ID, model, model, result.StatusCode, latency, result.Key, "", "", pt, ct, tt, usageJSON, string(iface))
+	h.logger.LogRequest(reqID, "POST", path, result.StatusCode, latency, result.Key, ch.Config.ID, model)
+	return nil
+}
+
+
 // ==================== Native Forwarding ====================
 
 func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, iface config.InterfaceType, body []byte, model string, stream bool, deepLog *debuglog.RequestLog) *FailoverError {
 	// For Chat requests, inject stream_options.include_usage=true unless explicitly disabled.
 	if iface == config.InterfaceChat {
 		body = injectStreamOptions(body)
+	}
+
+	// Fanout fast-path: non-streaming requests with fanout enabled.
+	if !stream && ch.FanoutEnabled() {
+		return h.fanoutForward(w, r, reqID, ch, iface, body, model, deepLog)
 	}
 
 	path := upstreamPathForInterface(iface, model, stream)
@@ -165,6 +226,12 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		h.sendError(w, 500, "marshal_source_failed", err.Error())
 		return nil
 	}
+
+	// Fanout fast-path for converted non-streaming requests.
+	if ch.FanoutEnabled() {
+		return h.fanoutForward(w, r, reqID, ch, source, sourceBody, model, deepLog)
+	}
+
 	path := upstreamPathForInterface(source, model, false)
 	logPath := path
 	if idx := strings.Index(logPath, "?"); idx >= 0 {

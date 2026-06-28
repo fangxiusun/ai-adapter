@@ -17,6 +17,80 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/translate"
 )
 
+
+
+// fanoutStreamForward sends the stream request to multiple keys concurrently
+// and forwards the first successful response to the client.
+func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Request, reqID string,
+	ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest,
+	model string, sourceBody []byte, path string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
+
+	url := ch.Config.NativeBaseURL(config.InterfaceChat) + path
+
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+	if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
+		applyProcessedHeaders(headers, processed, "Content-Type", "Authorization")
+	}
+
+	deepLog.LogUpstreamRequestHeader("POST", url, headers)
+	deepLog.LogUpstreamRequestBody(sourceBody)
+
+	start := time.Now()
+	result := ch.FanoutStream(r.Context(), channel.FanoutRequest{
+		Body:    sourceBody,
+		URL:     url,
+		Headers: headers,
+	})
+
+	if result.Error != nil {
+		h.logger.Warn("fanout_stream_failed", "request_id", reqID, "channel", ch.Config.ID, "error", result.Error)
+		return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: fanout stream failed: %s", ch.Config.ID, result.Error)}
+	}
+
+	resp := result.Response
+	defer resp.Body.Close()
+
+	ch.RecordLatency(result.Key, time.Since(start).Milliseconds())
+	ch.ReportSuccess(result.Key)
+
+	deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
+	deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
+
+	capture := newStreamUsageCapture(resp.Body)
+	flusher := func() {
+		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	deepLog.LogClientResponseHeader(200, w.Header())
+	w.WriteHeader(200)
+
+	switch target {
+	case config.InterfaceChat:
+		io.Copy(w, capture)
+	case config.InterfaceResponses:
+		respReq, _ := targetReq.(*translate.ResponsesRequest)
+		translate.PipeChatStreamToResponses(r.Context(), capture, w, respReq, translate.TranslateOpts{ExtractInlineThink: true})
+	case config.InterfaceMessages:
+		translate.PipeChatStreamToClaude(r.Context(), capture, w, chatReq, flusher)
+	case config.InterfaceGenerateContent:
+		translate.PipeChatStreamToGemini(r.Context(), capture, w, chatReq, flusher)
+	}
+
+	pt, ct, tt, usageJSON := capture.Usage()
+	h.recordLog(reqID, ch.Config.ID, model, model, 200, time.Since(start).Milliseconds(), result.Key, "", "", pt, ct, tt, usageJSON, string(target))
+	h.logger.LogRequest(reqID, "POST", path, 200, time.Since(start).Milliseconds(), result.Key, ch.Config.ID, model)
+	return nil
+}
+
 // ==================== Stream Forwarding ====================
 
 func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
@@ -30,6 +104,11 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 	}
 	path := upstreamPathForInterface(config.InterfaceChat, model, true)
 	logPath := "/v1/chat/completions"
+
+	// Fanout fast-path for streaming requests.
+	if ch.FanoutEnabled() {
+		return h.fanoutStreamForward(w, r, reqID, ch, target, chatReq, model, sourceBody, path, targetReq, deepLog)
+	}
 	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
 	for {
 		if fe := h.checkRotationAndTimeout(ch, rs, reqID); fe != nil {
