@@ -70,7 +70,12 @@ func main() {
 		}
 	}
 
-	logger := applog.New(cfg.Logging.Level, cfg.Logging.File, cfg.Logging.LogRequestBody, cfg.Logging.LogIO)
+	logger := applog.New(cfg.Logging.Level, cfg.Logging.File, cfg.Logging.LogRequestBody, cfg.Logging.LogIO,
+		applog.WithMaxSizeMB(cfg.Logging.MaxSizeMB),
+		applog.WithMaxBackups(cfg.Logging.MaxBackups),
+		applog.WithMaxAgeDays(cfg.Logging.MaxAgeDays),
+		applog.WithCompress(cfg.Logging.Compress),
+	)
 	defer logger.Close()
 
 	database, err := db.Open(cfg.Database.Path)

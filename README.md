@@ -47,6 +47,14 @@ cp config.example.yaml config.yaml
 ./ai-adapter -config config.yaml --deep-debug
 ```
 
+## CLI Parameters
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-config` | `config.yaml` | Path to config file |
+| `-deep-debug` | `false` | Enable deep debug mode: log each request/response to individual files in ./debug_logs/ |
+| `-daemon` | `false` | Run in background (daemon mode) |
+
 ## Configuration
 
 Channels declare their capabilities via interface URLs:

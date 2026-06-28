@@ -1,4 +1,4 @@
-package config
+﻿package config
 
 import (
 	"fmt"
@@ -39,6 +39,8 @@ type LoggingConfig struct {
 	MaxBackups     int    `yaml:"max_backups" json:"max_backups"`
 	LogRequestBody bool   `yaml:"log_request_body" json:"log_request_body"`
 	LogIO          bool   `yaml:"log_io" json:"log_io"`
+	MaxAgeDays     int    `yaml:"max_age_days" json:"max_age_days"`
+	Compress       bool   `yaml:"compress" json:"compress"`
 }
 
 type DatabaseConfig struct {
@@ -195,6 +197,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Logging.MaxBackups == 0 {
 		c.Logging.MaxBackups = 3
+	}
+	if c.Logging.MaxAgeDays == 0 {
+		 c.Logging.MaxAgeDays = 30
 	}
 	if c.Server.MaxRequestBodySizeMB == 0 {
 		c.Server.MaxRequestBodySizeMB = 64
