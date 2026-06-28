@@ -8,8 +8,14 @@ server:
 logging:
   level: "info"
   file: ""
+  # Maximum log file size in MB before rotation (default: 100).
   max_size_mb: 100
+  # Maximum number of old log files to retain (default: 3).
   max_backups: 3
+  # Maximum number of days to retain old log files (default: 30).
+  max_age_days: 30
+  # Compress old log files (default: true).
+  compress: true
   log_request_body: false
   log_io: false
 
