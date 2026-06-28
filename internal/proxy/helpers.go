@@ -189,6 +189,27 @@ func toInt(v interface{}) int {
 	return 0
 }
 
+
+// replaceModelInBody replaces the "model" field in a JSON request body with the given upstream model ID.
+// Returns the original body if parsing fails or if the models are already the same.
+func replaceModelInBody(body []byte, clientModel, upstreamModel string) []byte {
+	if clientModel == upstreamModel {
+		return body
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	if _, ok := raw["model"]; !ok {
+		return body
+	}
+	raw["model"] = upstreamModel
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return out
+}
 // injectStreamOptions ensures stream_options.include_usage is true for Chat requests
 // unless the user explicitly set it to false. Modifies body in-place and returns
 // the (possibly new) body bytes.

@@ -222,6 +222,7 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 		if mi, ok := ch.ResolveModel(clientModel); ok && mi.ID != "" {
 			upstreamModel = mi.ID
 		}
+		rawBody = replaceModelInBody(rawBody, clientModel, upstreamModel)
 		h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, rawBody, targetReq, deepLog)
 		return
 	}
@@ -249,9 +250,10 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 		if mi, ok := ch.ResolveModel(clientModel); ok && mi.ID != "" {
 			upstreamModel = mi.ID
 		}
+		dispatchBody := replaceModelInBody(rawBody, clientModel, upstreamModel)
 
 		h.logger.Debug("failover_attempt", "request_id", reqID, "channel", ch.Config.ID, "attempt", tried+1)
-		failErr := h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, rawBody, targetReq, deepLog)
+		failErr := h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, dispatchBody, targetReq, deepLog)
 
 		if failErr == nil {
 			// Success or non-failoverable error already handled
