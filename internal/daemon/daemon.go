@@ -1,4 +1,4 @@
-package daemon
+﻿package daemon
 
 import (
 	"fmt"
@@ -6,12 +6,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"syscall"
 )
 
 // Daemonize restarts the current process in the background.
 func Daemonize(logFile string) error {
 	if os.Getenv("AI_ADAPTER_DAEMON") == "1" {
+		// Child process: detach stdin from terminal.
+		detachStdin()
 		return nil
 	}
 
@@ -34,6 +36,16 @@ func Daemonize(logFile string) error {
 	return daemonizeUnix(execPath, newArgs, logFile)
 }
 
+// detachStdin replaces os.Stdin with /dev/null (or NUL on Windows)
+// so the child process does not hold the parent terminal.
+func detachStdin() {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		return
+	}
+	os.Stdin = devNull
+}
+
 func daemonizeUnix(execPath string, args []string, logFile string) error {
 	if logFile == "" {
 		logFile = "/dev/null"
@@ -42,6 +54,13 @@ func daemonizeUnix(execPath string, args []string, logFile string) error {
 	cmd := exec.Command(execPath, args...)
 	cmd.Env = append(os.Environ(), "AI_ADAPTER_DAEMON=1")
 
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		return fmt.Errorf("open /dev/null: %w", err)
+	}
+	defer devNull.Close()
+	cmd.Stdin = devNull
+
 	if logFile != "/dev/null" {
 		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
@@ -49,6 +68,9 @@ func daemonizeUnix(execPath string, args []string, logFile string) error {
 		}
 		cmd.Stdout = f
 		cmd.Stderr = f
+	} else {
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -65,34 +87,36 @@ func daemonizeUnix(execPath string, args []string, logFile string) error {
 }
 
 func daemonizeWindows(execPath string, args []string, logFile string) error {
-	var psScript string
-
-	// Build argument list portion
-	argsPart := ""
-	if len(args) > 0 {
-		psArgs := make([]string, 0, len(args))
-		for _, arg := range args {
-			psArgs = append(psArgs, fmt.Sprintf("'%s'", arg))
-		}
-		argsPart = fmt.Sprintf(" -ArgumentList @(%s)", strings.Join(psArgs, ", "))
-	}
-
-	// Start-Process does not allow RedirectStandardOutput and
-	// RedirectStandardError to point to the same file, so we
-	// only redirect stdout; stderr inherits the hidden window
-	// (effectively discarded) which is acceptable for a daemon.
-	if logFile != "" {
-		psScript = fmt.Sprintf("Start-Process -FilePath '%s'%s -WindowStyle Hidden -RedirectStandardOutput '%s'", execPath, argsPart, logFile)
-	} else {
-		psScript = fmt.Sprintf("Start-Process -FilePath '%s'%s -WindowStyle Hidden", execPath, argsPart)
-	}
-
-	cmd := exec.Command("powershell", "-Command", psScript)
+	cmd := exec.Command(execPath, args...)
 	cmd.Env = append(os.Environ(), "AI_ADAPTER_DAEMON=1")
 
-	output, err := cmd.CombinedOutput()
+	// CREATE_NO_WINDOW: no console window, no inherited console handles.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		HideWindow:    true,
+	}
+
+	// Detach stdio so the child does not hold the parent terminal.
+	devNull, err := os.Open(os.DevNull)
 	if err != nil {
-		return fmt.Errorf("start daemon: %w, output: %s", err, string(output))
+		return fmt.Errorf("open NUL: %w", err)
+	}
+	defer devNull.Close()
+	cmd.Stdin = devNull
+	cmd.Stderr = devNull
+
+	if logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("open log file: %w", err)
+		}
+		cmd.Stdout = f
+	} else {
+		cmd.Stdout = devNull
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
 	}
 
 	fmt.Println("Daemon started in background")
