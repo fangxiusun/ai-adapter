@@ -102,10 +102,21 @@ func (kp *KeyPool) Next() *KeyEntry {
 		return nil
 	}
 
+	// Final selection under read lock — re-validate availability after the lock gap.
 	kp.mu.RLock()
 	defer kp.mu.RUnlock()
+	filtered := available[:0]
+	for _, k := range available {
+		if k.State.IsAvailable() && !k.State.PermanentlySkipped {
+			filtered = append(filtered, k)
+		}
+	}
+	available = filtered
+	if len(available) == 0 {
+		return nil
+	}
 
-		switch kp.strategy {
+	switch kp.strategy {
 	case "random":
 		return available[rand.Intn(len(available))]
 	case "least-errors":

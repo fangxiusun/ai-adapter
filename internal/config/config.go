@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"fmt"
@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/fangxiusun/ai-adapter/internal/util"
 )
 
 type Config struct {
@@ -315,7 +317,7 @@ func (c *Config) validate() error {
 				return fmt.Errorf("channel %s: key value is required", ch.ID)
 			}
 			if keyValues[k.Value] {
-				return fmt.Errorf("channel %s: duplicate key value: %s", ch.ID, maskKeyValue(k.Value))
+				return fmt.Errorf("channel %s: duplicate key value: %s", ch.ID, util.MaskKey(k.Value))
 			}
 			keyValues[k.Value] = true
 		}
@@ -323,12 +325,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func maskKeyValue(s string) string {
-	if len(s) <= 8 {
-		return "***"
-	}
-	return s[:4] + "***" + s[len(s)-4:]
-}
 
 func (c *Config) GetTimeout() time.Duration {
 	return 60 * time.Second

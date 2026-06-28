@@ -376,11 +376,4 @@ func (h *ProxyHandler) convertedStreamForward(w http.ResponseWriter, r *http.Req
 
 
 
-// maskKey masks the API key for safe logging, showing only first 4 and last 4 characters.
-func maskKey(key string) string {
-	if len(key) <= 8 {
-		return "***"
-	}
-	return key[:4] + "***" + key[len(key)-4:]
-}
 

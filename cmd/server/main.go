@@ -284,7 +284,7 @@ func adminAuthMiddleware(adminToken string) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			// If no admin token configured, fall back to API token
+			// If no admin token configured, allow unauthenticated access
 			token := adminToken
 			if token == "" {
 				next.ServeHTTP(w, r)

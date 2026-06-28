@@ -20,6 +20,7 @@ type Hub struct {
 	register    chan *websocket.Conn
 	unregister  chan *websocket.Conn
 	done        chan struct{}
+	stopOnce    sync.Once
 }
 
 // Message represents a WebSocket message.
@@ -101,7 +102,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Stop gracefully shuts down the Hub, closing all client connections.
 func (h *Hub) Stop() {
-	close(h.done)
+	h.stopOnce.Do(func() { close(h.done) })
 }
 
 // StartHeartbeat sends periodic heartbeat messages.

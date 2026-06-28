@@ -144,11 +144,15 @@ func (s *Stats) GetErrorDistribution(minutes int) []ErrorDistEntry {
 	return result
 }
 
-// GetCurrentQPS returns requests in the current minute divided by 60.
+// GetCurrentQPS returns requests per second based on elapsed time in the current minute.
 func (s *Stats) GetCurrentQPS() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return float64(s.current.Total) / 60.0
+	elapsed := time.Since(s.current.Timestamp).Seconds()
+	if elapsed < 1 {
+		elapsed = 1
+	}
+	return float64(s.current.Total) / elapsed
 }
 
 // GetErrorRate returns the error rate for the current minute.
