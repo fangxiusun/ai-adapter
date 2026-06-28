@@ -56,13 +56,36 @@ failover:
   max_channel_attempts: 3       # Max channels to try per request
   total_timeout_ms: 120000      # Overall request timeout across all channels
   consecutive_fail_threshold: 2 # 5xx/connection failures before switching channel
+  load_balance: "priority"      # priority | round-robin | random
+
+
+# Multi-channel failover example:
+# When multiple channels serve the same model, the system can automatically
+# failover to the next channel on errors (5xx, connection failure, all keys exhausted).
+#
+# channels:
+#   - id: "mimo-primary"
+#     name: "MiMo Primary"
+#     priority: 10              # Lower number = higher priority (default: 100)
+#     chat_url: "https://primary.example.com"
+#     models:
+#       - id: "mimo-v2.5-pro"
+#     keys:
+#       - value: "sk-key-1"
+#
+#   - id: "mimo-backup"
+#     name: "MiMo Backup"
+#     priority: 20
+#     chat_url: "https://backup.example.com"
+#     models:
+#       - id: "mimo-v2.5-pro"
+#     keys:
+#       - value: "sk-key-2"
 
 channels:
   - id: "mimo"
     name: "MiMo"
     enabled: true
-    priority: 10            # Lower number = higher priority (default: 100)
-    load_balance: "priority" # priority | round-robin | random
     # proxy_id: "hk-proxy" 
     # Interface capability URLs. Setting a URL means the channel natively supports that interface.
     # Base URLs must NOT include /v1 or /v1beta paths.

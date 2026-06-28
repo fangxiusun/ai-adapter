@@ -45,7 +45,7 @@ type ModelInfo struct {
 	Aliases           []string
 }
 
-func NewChannelManager(cfgs []config.ChannelConfig, proxies []config.ProxyConfig, logger *log.Logger, database *db.DB) *ChannelManager {
+func NewChannelManager(cfgs []config.ChannelConfig, proxies []config.ProxyConfig, logger *log.Logger, database *db.DB, loadBalanceStrategy string) *ChannelManager {
 	cm := &ChannelManager{
 		channels: make(map[string]*Channel),
 		logger:   logger,
@@ -59,7 +59,7 @@ func NewChannelManager(cfgs []config.ChannelConfig, proxies []config.ProxyConfig
 		cm.channels[cfg.ID] = ch
 	}
 	cm.buildModelIndex()
-	cm.balancer = NewBalancer("")
+	cm.balancer = NewBalancer(loadBalanceStrategy)
 	return cm
 }
 

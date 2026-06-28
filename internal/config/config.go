@@ -57,7 +57,6 @@ type ChannelConfig struct {
 	Enabled          bool           `yaml:"enabled"`
 	ProxyID          string         `yaml:"proxy_id"`
 	Priority          int            `yaml:"priority"`
-	LoadBalance       string         `yaml:"load_balance"`
 	Models           []ModelConfig  `yaml:"models"`
 	DefaultModel     string         `yaml:"default_model"`
 	Keys             []KeyConfig    `yaml:"keys"`
@@ -95,7 +94,8 @@ type FailoverConfig struct {
 	Enabled                  bool `yaml:"enabled"`
 	MaxChannelAttempts       int  `yaml:"max_channel_attempts"`
 	TotalTimeoutMs           int  `yaml:"total_timeout_ms"`
-	ConsecutiveFailThreshold int  `yaml:"consecutive_fail_threshold"`
+	ConsecutiveFailThreshold int    `yaml:"consecutive_fail_threshold"`
+	LoadBalance              string `yaml:"load_balance"`
 }
 
 
@@ -235,9 +235,6 @@ func (c *Config) applyDefaults() {
 		if ch.Priority == 0 {
 			ch.Priority = 100
 		}
-		if ch.LoadBalance == "" {
-			ch.LoadBalance = "priority"
-		}
 	}
 	if c.Failover.MaxChannelAttempts == 0 {
 		c.Failover.MaxChannelAttempts = 3
@@ -247,6 +244,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Failover.ConsecutiveFailThreshold == 0 {
 		c.Failover.ConsecutiveFailThreshold = 2
+	}
+	if c.Failover.LoadBalance == "" {
+		c.Failover.LoadBalance = "priority"
 	}
 }
 

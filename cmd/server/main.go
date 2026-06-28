@@ -70,7 +70,7 @@ wsHub := websocket.NewHub()
 statsInstance := stats.NewStats()
 
 
-channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database)
+channels := channel.NewChannelManager(cfg.Channels, cfg.Proxies, logger, database, cfg.Failover.LoadBalance)
 	headerEngine := headerpolicy.NewEngine(cfg)
 	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger, headerEngine, statsInstance, wsHub)
 	webHandler := web.NewWebHandler(channels, database, cfg, statsInstance, wsHub)
