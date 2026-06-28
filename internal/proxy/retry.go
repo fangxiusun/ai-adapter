@@ -58,8 +58,10 @@ func (rs *RetryState) elapsed() time.Duration {
 }
 
 // getNextKey returns the next available key that has not been excluded in this retry cycle.
+// It iterates through all available keys in the pool to find one that hasn't been excluded.
 func (h *ProxyHandler) getNextKey(ch *channel.Channel, rs *RetryState) *channel.KeyEntry {
-	for i := 0; i < 10; i++ {
+	poolSize := ch.KeyPool().Size()
+	for i := 0; i < poolSize; i++ {
 		key := ch.GetKey()
 		if key == nil {
 			return nil

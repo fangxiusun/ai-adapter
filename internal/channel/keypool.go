@@ -228,7 +228,23 @@ func (kp *KeyPool) loadFromDB() {
 			}
 		}
 	}
-	kp.logger.Info("loaded key stats from db", "channel", kp.channelID, "count", len(rows))
+}
+
+func (kp *KeyPool) syncLoop() {
+	ticker := time.NewTicker(kp.syncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-kp.stopCh:
+			return
+		case <-ticker.C:
+			kp.SaveToDB()
+		}
+	}
+}
+
+func (kp *KeyPool) Stop() {
+	close(kp.stopCh)
 }
 
 func (kp *KeyPool) SaveToDB() {
@@ -236,29 +252,29 @@ func (kp *KeyPool) SaveToDB() {
 		return
 	}
 	kp.mu.RLock()
-	var rows []db.KeyStatsRow
+	rows := make([]db.KeyStatsRow, 0, len(kp.keys))
 	for _, k := range kp.keys {
 		rows = append(rows, db.KeyStatsRow{
-			ChannelID:      kp.channelID,
-			KeyName:        k.Name,
-			KeyValue:       k.Value,
-			RequestCount:   k.State.RequestCount,
-			ErrorCount:     k.State.ErrorCount,
-			Error400:       k.State.Error400,
-			Error401:       k.State.Error401,
-			Error403:       k.State.Error403,
-			Error404:       k.State.Error404,
-			Error429:       k.State.Error429,
-			Error4xx:       k.State.Error4xx,
-			Error5xx:       k.State.Error5xx,
-			ErrorNetwork:   k.State.ErrorNetwork,
-			ErrorStream:    k.State.ErrorStream,
-			TotalLatencyMs: k.State.TotalLatencyMs,
-			LastError:      k.State.LastError,
-			LastErrorTime:  k.State.LastErrorTime.UnixMilli(),
+			ChannelID:       kp.channelID,
+			KeyName:         k.Name,
+			KeyValue:        k.Value,
+			RequestCount:    k.State.RequestCount,
+			ErrorCount:      k.State.ErrorCount,
+			Error400:        k.State.Error400,
+			Error401:        k.State.Error401,
+			Error403:        k.State.Error403,
+			Error404:        k.State.Error404,
+			Error429:        k.State.Error429,
+			Error4xx:        k.State.Error4xx,
+			Error5xx:        k.State.Error5xx,
+			ErrorNetwork:    k.State.ErrorNetwork,
+			ErrorStream:     k.State.ErrorStream,
+			TotalLatencyMs:  k.State.TotalLatencyMs,
+			LastError:       k.State.LastError,
+			LastErrorTime:   k.State.LastErrorTime.UnixMilli(),
 			LastSuccessTime: k.State.LastSuccessTime.UnixMilli(),
-			Paused:         k.State.Paused,
-			PauseUntil:     k.State.PauseUntil.UnixMilli(),
+			Paused:          k.State.Paused,
+			PauseUntil:      k.State.PauseUntil.UnixMilli(),
 		})
 	}
 	kp.mu.RUnlock()
@@ -268,59 +284,6 @@ func (kp *KeyPool) SaveToDB() {
 	}
 }
 
-func (kp *KeyPool) syncLoop() {
-	ticker := time.NewTicker(kp.syncInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			kp.SaveToDB()
-		case <-kp.stopCh:
-			return
-		}
-	}
-}
-
-func (kp *KeyPool) Stop() {
-	close(kp.stopCh)
-}
-
-func (kp *KeyPool) GetN(n int) []*KeyEntry {
-	kp.mu.RLock()
-	defer kp.mu.RUnlock()
-
-	var available []*KeyEntry
-	for _, k := range kp.keys {
-		if k.State.IsAvailable() {
-			available = append(available, k)
-		}
-	}
-
-	if len(available) <= n {
-		return available
-	}
-
-	switch kp.strategy {
-	case "random":
-		rand.Shuffle(len(available), func(i, j int) {
-			available[i], available[j] = available[j], available[i]
-		})
-	case "least-rate-limited":
-		sort.Slice(available, func(i, j int) bool {
-			return available[i].State.RateLimitScore() < available[j].State.RateLimitScore()
-		})
-	default:
-		for i := 0; i < len(available); i++ {
-			for j := i + 1; j < len(available); j++ {
-				if available[j].State.RequestCount < available[i].State.RequestCount {
-					available[i], available[j] = available[j], available[i]
-				}
-			}
-		}
-	}
-
-	return available[:n]
-}
 
 func (kp *KeyPool) ReportSuccess(key string) {
 	kp.mu.RLock()
@@ -481,6 +444,30 @@ func (kp *KeyPool) SkipKey(keyName string) {
 	}
 }
 
+
+// GetN returns up to n available keys for fanout.
+func (kp *KeyPool) GetN(n int) []*KeyEntry {
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+	var available []*KeyEntry
+	for _, k := range kp.keys {
+		if k.State.IsAvailable() && !k.State.PermanentlySkipped {
+			available = append(available, k)
+		}
+	}
+	if len(available) <= n {
+		return available
+	}
+	return available[:n]
+}
+
+// Size returns the total number of keys in the pool.
+func (kp *KeyPool) Size() int {
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+	return len(kp.keys)
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -533,5 +520,3 @@ func (kp *KeyPool) AddKey(value, name string) error {
 	kp.keys = append(kp.keys, entry)
 	return nil
 }
-
-
