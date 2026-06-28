@@ -25,11 +25,13 @@ type RetryState struct {
 	maxRounds    int
 	retryDelay   time.Duration
 	maxTotalWait time.Duration
-	lastResult   *UpstreamResult
-	lastErr      error
+	lastResult           *UpstreamResult
+	lastErr              error
+	consecFails          int
+	consecFailThreshold  int
 }
 
-func newRetryState(ch *channel.Channel) *RetryState {
+func newRetryState(ch *channel.Channel, failoverThreshold int) *RetryState {
 	cfg := ch.Config.Retry
 	return &RetryState{
 		start:        time.Now(),
@@ -37,7 +39,13 @@ func newRetryState(ch *channel.Channel) *RetryState {
 		maxRounds:    cfg.MaxRotationRounds,
 		retryDelay:   time.Duration(cfg.RetryDelay429Ms) * time.Millisecond,
 		maxTotalWait: time.Duration(cfg.MaxTotalWaitMs) * time.Millisecond,
-		lastErr:      fmt.Errorf("all retries failed"),
+		lastErr:             fmt.Errorf("all retries failed"),
+		consecFailThreshold: func() int {
+			if failoverThreshold > 0 {
+				return failoverThreshold
+			}
+			return 9999 // effectively disabled
+		}(),
 	}
 }
 
@@ -64,17 +72,10 @@ func (h *ProxyHandler) getNextKey(ch *channel.Channel, rs *RetryState) *channel.
 }
 
 // checkRotationAndTimeout checks if the retry loop should stop due to timeout.
-// Returns true if the caller should return (timeout reached).
-func (h *ProxyHandler) checkRotationAndTimeout(ch *channel.Channel, rs *RetryState, w http.ResponseWriter, reqID string, path string) bool {
+// Returns a FailoverError if timeout reached, nil otherwise.
+func (h *ProxyHandler) checkRotationAndTimeout(ch *channel.Channel, rs *RetryState, reqID string) *FailoverError {
 	if rs.isTimedOut() {
-		if rs.lastResult != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(rs.lastResult.StatusCode)
-			w.Write(rs.lastResult.Body)
-		} else {
-			h.sendError(w, 504, "timeout", "max total wait exceeded")
-		}
-		return true
+		return &FailoverError{StatusCode: 504, Message: fmt.Sprintf("channel %s: max total wait exceeded (%dms)", ch.Config.ID, rs.maxTotalWait.Milliseconds())}
 	}
-	return false
+	return nil
 }

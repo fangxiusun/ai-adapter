@@ -19,32 +19,31 @@ import (
 
 // ==================== Stream Forwarding ====================
 
-func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) {
+func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
 	// Inject stream_options.include_usage=true for Chat upstream.
 	injectedReq := *chatReq
 	injectedReq.StreamOptions = &translate.StreamOptions{IncludeUsage: true}
 	sourceBody, err := json.Marshal(&injectedReq)
 	if err != nil {
 		h.sendError(w, 500, "marshal_failed", err.Error())
-		return
+		return nil
 	}
 	path := upstreamPathForInterface(config.InterfaceChat, model, true)
 	logPath := "/v1/chat/completions"
-	rs := newRetryState(ch)
+	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
 	for {
-		if h.checkRotationAndTimeout(ch, rs, w, reqID, logPath) {
-			return
+		if fe := h.checkRotationAndTimeout(ch, rs, reqID); fe != nil {
+			return fe
 		}
 		key := h.getNextKey(ch, rs)
 		if key == nil {
-			h.sendError(w, 503, "no_available_keys", "all keys are unavailable")
-			return
+			return &FailoverError{StatusCode: 503, Message: fmt.Sprintf("channel %s: no available keys", ch.Config.ID)}
 		}
 		url := ch.Config.NativeBaseURL(config.InterfaceChat) + path
 		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
 			h.sendError(w, 500, "create_request_failed", err.Error())
-			return
+			return nil
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
@@ -57,12 +56,17 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
+			rs.consecFails++
+			if rs.consecFails >= rs.consecFailThreshold {
+				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
+			}
 			continue
 		}
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
 			ch.ReportError(key.Value, 401)
 			rs.excluded[key.Value] = true
+			rs.consecFails = 0
 			continue
 		}
 		if resp.StatusCode == 429 {
@@ -76,13 +80,25 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
+			rs.consecFails++
+			if rs.consecFails >= rs.consecFailThreshold {
+				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
+			}
 			continue
+		}
+		if resp.StatusCode == 400 {
+			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			resp.Body.Close()
+			ch.ReportError(key.Value, 400)
+			h.sendError(w, 400, "bad_request", string(errBodyBytes))
+			return nil
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
+			rs.consecFails = 0
 			h.logger.Warn("upstream_error",
 				"request_id", reqID,
 				"channel", ch.Config.ID,
@@ -92,9 +108,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 				"request_body", string(sourceBody),
 				"upstream_body", string(errBodyBytes),
 			)
-			h.sendError(w, resp.StatusCode, "upstream_error",
-				fmt.Sprintf("upstream returned %d: %s", resp.StatusCode, string(errBodyBytes)))
-			return
+			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
@@ -130,41 +144,40 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		ch.ReportSuccess(key.Value)
 		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
-		return
+		return nil
 	}
 }
 
-func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) {
+func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
 	sourceReq, err := convertChatToSource(source, chatReq)
 	if err != nil {
 		h.sendError(w, 400, "convert_to_source_failed", err.Error())
-		return
+		return nil
 	}
 	sourceBody, err := json.Marshal(sourceReq)
 	if err != nil {
 		h.sendError(w, 500, "marshal_source_failed", err.Error())
-		return
+		return nil
 	}
 	path := upstreamPathForInterface(source, model, true)
 	logPath := path
 	if idx := strings.Index(logPath, "?"); idx >= 0 {
 		logPath = logPath[:idx]
 	}
-	rs := newRetryState(ch)
+	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
 	for {
-		if h.checkRotationAndTimeout(ch, rs, w, reqID, logPath) {
-			return
+		if fe := h.checkRotationAndTimeout(ch, rs, reqID); fe != nil {
+			return fe
 		}
 		key := h.getNextKey(ch, rs)
 		if key == nil {
-			h.sendError(w, 503, "no_available_keys", "all keys are unavailable")
-			return
+			return &FailoverError{StatusCode: 503, Message: fmt.Sprintf("channel %s: no available keys", ch.Config.ID)}
 		}
 		url := ch.Config.NativeBaseURL(source) + path
 		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
 			h.sendError(w, 500, "create_request_failed", err.Error())
-			return
+			return nil
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
@@ -177,12 +190,17 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
+			rs.consecFails++
+			if rs.consecFails >= rs.consecFailThreshold {
+				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
+			}
 			continue
 		}
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
 			ch.ReportError(key.Value, 401)
 			rs.excluded[key.Value] = true
+			rs.consecFails = 0
 			continue
 		}
 		if resp.StatusCode == 429 {
@@ -196,13 +214,25 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
+			rs.consecFails++
+			if rs.consecFails >= rs.consecFailThreshold {
+				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
+			}
 			continue
+		}
+		if resp.StatusCode == 400 {
+			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			resp.Body.Close()
+			ch.ReportError(key.Value, 400)
+			h.sendError(w, 400, "bad_request", string(errBodyBytes))
+			return nil
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
+			rs.consecFails = 0
 			h.logger.Warn("upstream_error",
 				"request_id", reqID,
 				"channel", ch.Config.ID,
@@ -212,9 +242,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 				"request_body", string(sourceBody),
 				"upstream_body", string(errBodyBytes),
 			)
-			h.sendError(w, resp.StatusCode, "upstream_error",
-				fmt.Sprintf("upstream returned %d: %s", resp.StatusCode, string(errBodyBytes)))
-			return
+			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 
 		chatResp, err := h.accumulateStreamToChat(r.Context(), source, resp.Body, chatReq)
@@ -245,7 +273,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
 		h.recordLog(reqID, ch.Config.ID, model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
-		return
+		return nil
 	}
 }
 

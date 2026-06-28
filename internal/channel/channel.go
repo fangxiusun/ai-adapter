@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,6 +21,7 @@ type Channel struct {
 	keyPool    *KeyPool
 	models     map[string]config.ModelConfig
 	httpClient *http.Client
+	health     *ChannelHealth
 	logger     *log.Logger
 }
 
@@ -29,6 +31,8 @@ type ChannelManager struct {
 	logger     *log.Logger
 	mu         sync.RWMutex
 	database   *db.DB
+	modelIndex map[string][]*Channel
+	balancer   Balancer
 }
 
 type ModelInfo struct {
@@ -54,6 +58,8 @@ func NewChannelManager(cfgs []config.ChannelConfig, proxies []config.ProxyConfig
 		ch := newChannel(cfg, proxies, logger, database)
 		cm.channels[cfg.ID] = ch
 	}
+	cm.buildModelIndex()
+	cm.balancer = NewBalancer("")
 	return cm
 }
 
@@ -67,6 +73,7 @@ func newChannel(cfg config.ChannelConfig, proxies []config.ProxyConfig, logger *
 	}
 	return &Channel{
 		Config:     cfg,
+		health:     NewChannelHealth(3, 60),
 		keyPool:    NewKeyPool(cfg.Keys, cfg.KeyStrategy, cfg.ID, logger, cfg.Retry.ConsecErrorThreshold, cfg.Retry.PauseMultiplierSec, cfg.Retry.PauseMaxSec, database, time.Duration(cfg.KeyStatsSyncSec)*time.Second),
 		models:     models,
 		httpClient: buildHTTPClient(cfg, proxies),
@@ -139,7 +146,8 @@ func (cm *ChannelManager) SelectChannel(model string) (*Channel, *ModelInfo, err
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	for _, ch := range cm.channels {
+	candidates := cm.modelIndex[model]
+	for _, ch := range candidates {
 		if !ch.Config.Enabled {
 			continue
 		}
@@ -182,6 +190,66 @@ func (cm *ChannelManager) ListChannels() []*Channel {
 	}
 	return list
 }
+
+// buildModelIndex builds a lookup from modelID to sorted list of channels.
+func (cm *ChannelManager) buildModelIndex() {
+	cm.modelIndex = make(map[string][]*Channel)
+	for _, ch := range cm.channels {
+		if !ch.Config.Enabled {
+			continue
+		}
+		models := make(map[string]bool)
+		for _, m := range ch.Config.Models {
+			models[m.ID] = true
+			for _, alias := range m.Aliases {
+				models[alias] = true
+			}
+		}
+		for modelID := range models {
+			cm.modelIndex[modelID] = append(cm.modelIndex[modelID], ch)
+		}
+	}
+	// Sort by priority (lower number = higher priority)
+	for modelID := range cm.modelIndex {
+		sort.Slice(cm.modelIndex[modelID], func(i, j int) bool {
+			return cm.modelIndex[modelID][i].Config.Priority < cm.modelIndex[modelID][j].Config.Priority
+		})
+	}
+}
+
+// SelectChannelCandidates returns all channels that support the given model, sorted by priority.
+func (cm *ChannelManager) SelectChannelCandidates(model string) []*Channel {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	if candidates, ok := cm.modelIndex[model]; ok {
+		return candidates
+	}
+
+	// Fallback: use default model of default channel
+	if ch, ok := cm.channels[cm.defaultID]; ok && ch.Config.Enabled {
+		if _, ok := ch.models[ch.Config.DefaultModel]; ok {
+			return []*Channel{ch}
+		}
+	}
+	return nil
+}
+
+// IsHealthy returns whether the channel is currently available for requests.
+func (ch *Channel) IsHealthy() bool {
+	return ch.health.IsHealthy()
+}
+
+// ReportChannelSuccess reports a successful request to the channel health tracker.
+func (ch *Channel) ReportChannelSuccess() {
+	ch.health.ReportSuccess()
+}
+
+// ReportChannelFailure reports a failed request (5xx/connection) to the channel health tracker.
+func (ch *Channel) ReportChannelFailure() {
+	ch.health.ReportFailure()
+}
+
 
 func (ch *Channel) ResolveModel(clientModel string) (ModelInfo, bool) {
 	if m, ok := ch.models[clientModel]; ok {

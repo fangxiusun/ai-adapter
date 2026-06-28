@@ -13,6 +13,7 @@ type Config struct {
 	Logging  LoggingConfig   `yaml:"logging"`
 	Database DatabaseConfig  `yaml:"database"`
 	Proxies  []ProxyConfig   `yaml:"proxies"`
+	Failover  FailoverConfig  `yaml:"failover"`
 	Channels []ChannelConfig `yaml:"channels"`
 
 	// New simplified format
@@ -55,6 +56,8 @@ type ChannelConfig struct {
 	Name             string         `yaml:"name"`
 	Enabled          bool           `yaml:"enabled"`
 	ProxyID          string         `yaml:"proxy_id"`
+	Priority          int            `yaml:"priority"`
+	LoadBalance       string         `yaml:"load_balance"`
 	Models           []ModelConfig  `yaml:"models"`
 	DefaultModel     string         `yaml:"default_model"`
 	Keys             []KeyConfig    `yaml:"keys"`
@@ -86,6 +89,15 @@ type RetryConfig struct {
 	PauseMultiplierSec   int `yaml:"pause_multiplier_sec"`
 	PauseMaxSec          int `yaml:"pause_max_sec"`
 }
+
+// FailoverConfig controls cross-channel failover behavior.
+type FailoverConfig struct {
+	Enabled                  bool `yaml:"enabled"`
+	MaxChannelAttempts       int  `yaml:"max_channel_attempts"`
+	TotalTimeoutMs           int  `yaml:"total_timeout_ms"`
+	ConsecutiveFailThreshold int  `yaml:"consecutive_fail_threshold"`
+}
+
 
 type ModelConfig struct {
 	ID                string   `yaml:"id"`
@@ -220,6 +232,21 @@ func (c *Config) applyDefaults() {
 		if ch.KeyStatsSyncSec == 0 {
 			ch.KeyStatsSyncSec = 60
 		}
+		if ch.Priority == 0 {
+			ch.Priority = 100
+		}
+		if ch.LoadBalance == "" {
+			ch.LoadBalance = "priority"
+		}
+	}
+	if c.Failover.MaxChannelAttempts == 0 {
+		c.Failover.MaxChannelAttempts = 3
+	}
+	if c.Failover.TotalTimeoutMs == 0 {
+		c.Failover.TotalTimeoutMs = 120000
+	}
+	if c.Failover.ConsecutiveFailThreshold == 0 {
+		c.Failover.ConsecutiveFailThreshold = 2
 	}
 }
 
@@ -340,3 +367,4 @@ func (ch *ChannelConfig) NativeBaseURL(iface InterfaceType) string {
 	}
 	return ""
 }
+

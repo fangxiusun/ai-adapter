@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
@@ -65,17 +66,12 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		h.sendError(w, 400, "missing_model", "model is required")
 		return
 	}
-	ch, modelInfo, err := h.channels.SelectChannel(req.Model)
-	if err != nil {
-		h.sendError(w, 404, "no_channel", err.Error())
+	candidates := h.channels.SelectChannelCandidates(req.Model)
+	if len(candidates) == 0 {
+		h.sendError(w, 404, "no_channel", "no channel found for model: "+req.Model)
 		return
 	}
-	upstreamModel := req.Model
-	if modelInfo != nil && modelInfo.ID != "" {
-		upstreamModel = modelInfo.ID
-	}
-	req.Model = upstreamModel
-	h.dispatch(w, r, reqID, ch, config.InterfaceChat, upstreamModel, req.Stream, body, &req, deepLog)
+	h.failoverLoop(w, r, reqID, candidates, config.InterfaceChat, req.Model, req.Stream, body, &req, deepLog)
 }
 
 func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
@@ -105,17 +101,12 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		h.sendError(w, 400, "missing_model", "model is required")
 		return
 	}
-	ch, modelInfo, err := h.channels.SelectChannel(req.Model)
-	if err != nil {
-		h.sendError(w, 404, "no_channel", err.Error())
+	candidates := h.channels.SelectChannelCandidates(req.Model)
+	if len(candidates) == 0 {
+		h.sendError(w, 404, "no_channel", "no channel found for model: "+req.Model)
 		return
 	}
-	upstreamModel := req.Model
-	if modelInfo != nil && modelInfo.ID != "" {
-		upstreamModel = modelInfo.ID
-	}
-	req.Model = upstreamModel
-	h.dispatch(w, r, reqID, ch, config.InterfaceResponses, upstreamModel, req.Stream, body, &req, deepLog)
+	h.failoverLoop(w, r, reqID, candidates, config.InterfaceResponses, req.Model, req.Stream, body, &req, deepLog)
 }
 
 func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
@@ -145,17 +136,12 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		h.sendError(w, 400, "missing_model", "model is required")
 		return
 	}
-	ch, modelInfo, err := h.channels.SelectChannel(req.Model)
-	if err != nil {
-		h.sendError(w, 404, "no_channel", err.Error())
+	candidates := h.channels.SelectChannelCandidates(req.Model)
+	if len(candidates) == 0 {
+		h.sendError(w, 404, "no_channel", "no channel found for model: "+req.Model)
 		return
 	}
-	upstreamModel := req.Model
-	if modelInfo != nil && modelInfo.ID != "" {
-		upstreamModel = modelInfo.ID
-	}
-	req.Model = upstreamModel
-	h.dispatch(w, r, reqID, ch, config.InterfaceMessages, upstreamModel, req.Stream, body, &req, deepLog)
+	h.failoverLoop(w, r, reqID, candidates, config.InterfaceMessages, req.Model, req.Stream, body, &req, deepLog)
 }
 
 func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Request) {
@@ -187,41 +173,104 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 		h.sendError(w, 400, "invalid_json", err.Error())
 		return
 	}
-	ch, modelInfo, err := h.channels.SelectChannel(model)
-	if err != nil {
-		h.sendError(w, 404, "no_channel", err.Error())
+	candidates := h.channels.SelectChannelCandidates(model)
+	if len(candidates) == 0 {
+		h.sendError(w, 404, "no_channel", "no channel found for model: "+model)
 		return
 	}
-	upstreamModel := model
-	if modelInfo != nil && modelInfo.ID != "" {
-		upstreamModel = modelInfo.ID
-	}
-	h.dispatch(w, r, reqID, ch, config.InterfaceGenerateContent, upstreamModel, stream, body, &req, deepLog)
+	h.failoverLoop(w, r, reqID, candidates, config.InterfaceGenerateContent, model, stream, body, &req, deepLog)
 }
 
 // ==================== Core Dispatch ====================
 
-func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, model string, stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog) {
+func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, model string, stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
 	source, ok := config.BestSourceForTarget(target, &ch.Config)
 	if !ok {
 		h.sendError(w, 503, "no_conversion_path",
 			fmt.Sprintf("channel %s has no native interface and no conversion path to %s", ch.Config.ID, target))
-		return
+		return nil
 	}
 	h.logger.Debug("dispatch", "request_id", reqID, "target", target, "source", source, "native", source == target)
 	if source == target {
-		h.nativeForward(w, r, reqID, ch, source, rawBody, model, stream, deepLog)
-		return
+		return h.nativeForward(w, r, reqID, ch, source, rawBody, model, stream, deepLog)
 	}
 	chatReq, err := h.buildChatRequest(target, targetReq, model, stream)
 	if err != nil {
 		h.sendError(w, 400, "convert_failed", err.Error())
-		return
+		return nil
 	}
 	if stream {
-		h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
+		return h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
+	}
+	return h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
+}
+
+
+
+// failoverLoop tries dispatching to each candidate channel in order.
+// On failoverable errors, it moves to the next channel.
+// On success or non-failoverable errors, it returns immediately.
+func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqID string,
+	candidates []*channel.Channel, target config.InterfaceType, clientModel string,
+	stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog) {
+
+	fc := h.config.Failover
+	if !fc.Enabled || len(candidates) <= 1 {
+		// No failover — use first candidate directly
+		ch := candidates[0]
+		upstreamModel := clientModel
+		if mi, ok := ch.ResolveModel(clientModel); ok && mi.ID != "" {
+			upstreamModel = mi.ID
+		}
+		h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, rawBody, targetReq, deepLog)
+		return
+	}
+
+	deadline := time.Now().Add(time.Duration(fc.TotalTimeoutMs) * time.Millisecond)
+	tried := 0
+	var lastErr *FailoverError
+
+	for _, ch := range candidates {
+		if tried >= fc.MaxChannelAttempts {
+			break
+		}
+		if time.Now().After(deadline) {
+			h.logger.Warn("failover_timeout", "request_id", reqID, "tried", tried)
+			break
+		}
+		if !ch.IsHealthy() {
+			h.logger.Debug("failover_skip_unhealthy", "request_id", reqID, "channel", ch.Config.ID)
+			continue
+		}
+
+		upstreamModel := clientModel
+		if mi, ok := ch.ResolveModel(clientModel); ok && mi.ID != "" {
+			upstreamModel = mi.ID
+		}
+
+		h.logger.Debug("failover_attempt", "request_id", reqID, "channel", ch.Config.ID, "attempt", tried+1)
+		failErr := h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, rawBody, targetReq, deepLog)
+
+		if failErr == nil {
+			// Success or non-failoverable error already handled
+			ch.ReportChannelSuccess()
+			return
+		}
+
+		// Failoverable error — report to health tracker and try next channel
+		ch.ReportChannelFailure()
+		lastErr = failErr
+		tried++
+		h.logger.Warn("failover_next", "request_id", reqID,
+			"failed_channel", ch.Config.ID, "reason", failErr.Message, "tried", tried)
+	}
+
+	// All channels failed
+	if lastErr != nil {
+		h.sendError(w, lastErr.StatusCode, "all_channels_failed",
+			fmt.Sprintf("all %d channels failed, last error: %s", tried, lastErr.Message))
 	} else {
-		h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
+		h.sendError(w, 503, "no_healthy_channel", "no healthy channels available")
 	}
 }
 

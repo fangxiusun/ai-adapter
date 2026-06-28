@@ -48,10 +48,21 @@ database:
 #     type: "socks5"
 #     url: "socks5://user:pass@socks.example.com:1080"
 
+# Cross-channel failover configuration (optional)
+# When enabled, if a channel fails with retryable errors (5xx, connection failure),
+# the system automatically tries the next channel for the same model.
+failover:
+  enabled: false
+  max_channel_attempts: 3       # Max channels to try per request
+  total_timeout_ms: 120000      # Overall request timeout across all channels
+  consecutive_fail_threshold: 2 # 5xx/connection failures before switching channel
+
 channels:
   - id: "mimo"
     name: "MiMo"
     enabled: true
+    priority: 10            # Lower number = higher priority (default: 100)
+    load_balance: "priority" # priority | round-robin | random
     # proxy_id: "hk-proxy" 
     # Interface capability URLs. Setting a URL means the channel natively supports that interface.
     # Base URLs must NOT include /v1 or /v1beta paths.
