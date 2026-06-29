@@ -5,10 +5,10 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-
-	"github.com/fangxiusun/ai-adapter/internal/util"
 	"sync"
 	"time"
+
+	"github.com/fangxiusun/ai-adapter/internal/util"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )

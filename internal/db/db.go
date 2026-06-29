@@ -128,20 +128,20 @@ func (db *DB) InsertLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, u
 }
 
 type LogEntry struct {
-	ID              int64  `json:"id"`
-	RequestID       string `json:"request_id"`
-	Timestamp       int64  `json:"timestamp"`
-	ChannelID       string `json:"channel_id"`
-	Model           string `json:"model"`
-	StatusCode      int    `json:"status_code"`
-	LatencyMs       int64  `json:"latency_ms"`
-	KeyName         string `json:"key_name"`
-	ErrorCode       string `json:"error_code"`
-	ErrorMessage    string `json:"error_message"`
-	PromptTokens    int    `json:"prompt_tokens"`
-	CompletionTokens int   `json:"completion_tokens"`
-	TotalTokens     int    `json:"total_tokens"`
-	UsageJSON       string `json:"usage_json,omitempty"`
+	ID               int64  `json:"id"`
+	RequestID        string `json:"request_id"`
+	Timestamp        int64  `json:"timestamp"`
+	ChannelID        string `json:"channel_id"`
+	Model            string `json:"model"`
+	StatusCode       int    `json:"status_code"`
+	LatencyMs        int64  `json:"latency_ms"`
+	KeyName          string `json:"key_name"`
+	ErrorCode        string `json:"error_code"`
+	ErrorMessage     string `json:"error_message"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	UsageJSON        string `json:"usage_json,omitempty"`
 }
 
 func (db *DB) QueryLogs(channelID string, statusMin, statusMax int, from, to int64, limit, offset int) ([]LogEntry, error) {
@@ -226,26 +226,26 @@ func (db *DB) Vacuum() error {
 }
 
 type KeyStatsRow struct {
-	ChannelID      string
-	KeyName        string
-	KeyValue       string
-	RequestCount   int64
-	ErrorCount     int64
-	Error400       int64
-	Error401       int64
-	Error403       int64
-	Error404       int64
-	Error429       int64
-	Error4xx       int64
-	Error5xx       int64
-	ErrorNetwork   int64
-	ErrorStream    int64
-	TotalLatencyMs int64
-	LastError      string
-	LastErrorTime  int64
+	ChannelID       string
+	KeyName         string
+	KeyValue        string
+	RequestCount    int64
+	ErrorCount      int64
+	Error400        int64
+	Error401        int64
+	Error403        int64
+	Error404        int64
+	Error429        int64
+	Error4xx        int64
+	Error5xx        int64
+	ErrorNetwork    int64
+	ErrorStream     int64
+	TotalLatencyMs  int64
+	LastError       string
+	LastErrorTime   int64
 	LastSuccessTime int64
-	Paused         bool
-	PauseUntil     int64
+	Paused          bool
+	PauseUntil      int64
 }
 
 func (db *DB) LoadKeyStats(channelID string) ([]KeyStatsRow, error) {
@@ -358,7 +358,6 @@ func (db *DB) SaveKeyStatsBatch(rows []KeyStatsRow) error {
 	}
 	return tx.Commit()
 }
-
 
 // QueryLogByRequestID queries a single log entry by request_id.
 func (db *DB) QueryLogByRequestID(requestID string) (*LogEntry, error) {

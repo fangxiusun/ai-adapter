@@ -118,13 +118,20 @@ func (kp *KeyPool) Next() *KeyEntry {
 
 	switch kp.strategy {
 	case "random":
-		return available[rand.Intn(len(available))]
+		selected := available[rand.Intn(len(available))]
+		if selected.State.IsPauseExpired() {
+			selected.State.ResetPause()
+		}
+		return selected
 	case "least-errors":
 		best := available[0]
 		for _, k := range available[1:] {
 			if k.State.ErrorCount < best.State.ErrorCount {
 				best = k
 			}
+		}
+		if best.State.IsPauseExpired() {
+			best.State.ResetPause()
 		}
 		return best
 	case "least-latency":
@@ -134,12 +141,23 @@ func (kp *KeyPool) Next() *KeyEntry {
 				best = k
 			}
 		}
+		if best.State.IsPauseExpired() {
+			best.State.ResetPause()
+		}
 		return best
 	case "least-rate-limited":
-		return kp.leastRateLimited(available)
+		selected := kp.leastRateLimited(available)
+		if selected != nil && selected.State.IsPauseExpired() {
+			selected.State.ResetPause()
+		}
+		return selected
 	default:
 		idx := atomic.AddUint64(&kp.counter, 1)
-		return available[idx%uint64(len(available))]
+		selected := available[idx%uint64(len(available))]
+		if selected.State.IsPauseExpired() {
+			selected.State.ResetPause()
+		}
+		return selected
 	}
 }
 
@@ -458,6 +476,10 @@ func (kp *KeyPool) GetN(n int) []*KeyEntry {
 	if len(available) <= n {
 		return available
 	}
+	// Shuffle to avoid deterministic selection, then take first n.
+	rand.Shuffle(len(available), func(i, j int) {
+		available[i], available[j] = available[j], available[i]
+	})
 	return available[:n]
 }
 
