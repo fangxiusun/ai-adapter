@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -15,9 +14,8 @@ type Config struct {
 	Logging  LoggingConfig   `yaml:"logging"`
 	Database DatabaseConfig  `yaml:"database"`
 	Proxies  []ProxyConfig   `yaml:"proxies"`
-	Failover  FailoverConfig  `yaml:"failover"`
+	Failover FailoverConfig  `yaml:"failover"`
 	Channels []ChannelConfig `yaml:"channels"`
-
 
 	// New simplified format
 	Headers *HeadersConfig `yaml:"headers,omitempty"`
@@ -59,23 +57,23 @@ type ProxyConfig struct {
 
 // ChannelConfig defines a channel with interface capability URLs.
 type ChannelConfig struct {
-	ID               string         `yaml:"id"`
-	Name             string         `yaml:"name"`
-	Enabled          bool           `yaml:"enabled"`
-	ProxyID          string         `yaml:"proxy_id"`
-	Priority          int            `yaml:"priority"`
-	Models           []ModelConfig  `yaml:"models"`
-	DefaultModel     string         `yaml:"default_model"`
-	Keys             []KeyConfig    `yaml:"keys"`
-	KeyStrategy      string         `yaml:"key_strategy"`
-	MaxRetries       int            `yaml:"max_retries"`
-	RetryDelayMs     int            `yaml:"retry_delay_ms"`
-	RequestTimeoutMs int            `yaml:"request_timeout_ms"`
-	Fanout           FanoutConfig   `yaml:"fanout"`
-	Thinking         ThinkingConfig `yaml:"thinking"`
+	ID               string          `yaml:"id"`
+	Name             string          `yaml:"name"`
+	Enabled          bool            `yaml:"enabled"`
+	ProxyID          string          `yaml:"proxy_id"`
+	Priority         int             `yaml:"priority"`
+	Models           []ModelConfig   `yaml:"models"`
+	DefaultModel     string          `yaml:"default_model"`
+	Keys             []KeyConfig     `yaml:"keys"`
+	KeyStrategy      string          `yaml:"key_strategy"`
+	MaxRetries       int             `yaml:"max_retries"`
+	RetryDelayMs     int             `yaml:"retry_delay_ms"`
+	RequestTimeoutMs int             `yaml:"request_timeout_ms"`
+	Fanout           FanoutConfig    `yaml:"fanout"`
+	Thinking         ThinkingConfig  `yaml:"thinking"`
 	WebSearch        WebSearchConfig `yaml:"web_search"`
-	Retry            RetryConfig    `yaml:"retry"`
-	KeyStatsSyncSec  int            `yaml:"key_stats_sync_sec"`
+	Retry            RetryConfig     `yaml:"retry"`
+	KeyStatsSyncSec  int             `yaml:"key_stats_sync_sec"`
 
 	ChatURL            string `yaml:"chat_url"`
 	ResponsesURL       string `yaml:"responses_url"`
@@ -98,13 +96,12 @@ type RetryConfig struct {
 
 // FailoverConfig controls cross-channel failover behavior.
 type FailoverConfig struct {
-	Enabled                  bool `yaml:"enabled"`
-	MaxChannelAttempts       int  `yaml:"max_channel_attempts"`
-	TotalTimeoutMs           int  `yaml:"total_timeout_ms"`
+	Enabled                  bool   `yaml:"enabled"`
+	MaxChannelAttempts       int    `yaml:"max_channel_attempts"`
+	TotalTimeoutMs           int    `yaml:"total_timeout_ms"`
 	ConsecutiveFailThreshold int    `yaml:"consecutive_fail_threshold"`
 	LoadBalance              string `yaml:"load_balance"`
 }
-
 
 type ModelConfig struct {
 	ID                string   `yaml:"id"`
@@ -202,7 +199,7 @@ func (c *Config) applyDefaults() {
 		c.Logging.MaxBackups = 3
 	}
 	if c.Logging.MaxAgeDays == 0 {
-		 c.Logging.MaxAgeDays = 30
+		c.Logging.MaxAgeDays = 30
 	}
 	if c.Server.MaxRequestBodySizeMB == 0 {
 		c.Server.MaxRequestBodySizeMB = 64
@@ -325,11 +322,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-
-func (c *Config) GetTimeout() time.Duration {
-	return 60 * time.Second
-}
-
 // GetProxy returns the proxy config with the given id, or nil if not found.
 func (c *Config) GetProxy(id string) *ProxyConfig {
 	for i := range c.Proxies {
@@ -374,5 +366,3 @@ func (ch *ChannelConfig) NativeBaseURL(iface InterfaceType) string {
 	}
 	return ""
 }
-
-

@@ -1,12 +1,9 @@
-package main
+﻿package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +22,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"github.com/fangxiusun/ai-adapter/internal/proxy"
 	"github.com/fangxiusun/ai-adapter/internal/stats"
+	"github.com/fangxiusun/ai-adapter/internal/util"
 	"github.com/fangxiusun/ai-adapter/internal/web"
 	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
@@ -182,9 +180,18 @@ func loggingMiddleware(logger *applog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-			model := extractModelForLog(r)
+			model := util.ExtractModelFromRequest(r, 4*1024)
+
+			bodyToClose := r.Body
+			defer func() {
+				if bodyToClose != nil {
+					_ = bodyToClose.Close()
+				}
+			}()
+
 			next.ServeHTTP(w, r)
-			if r.URL.Path != "/admin/api/health" {
+			if strings.HasPrefix(r.URL.Path, "/v1/") ||
+				strings.HasPrefix(r.URL.Path, "/v1beta/") {
 				logger.Debug("http_request",
 					"method", r.Method,
 					"path", r.URL.Path,
@@ -194,39 +201,6 @@ func loggingMiddleware(logger *applog.Logger) func(http.Handler) http.Handler {
 			}
 		})
 	}
-}
-
-func extractModelForLog(r *http.Request) string {
-	// 1. Gemini: 从 URL 拿
-	if strings.HasPrefix(r.URL.Path, "/v1beta/models/") {
-		prefix := "/v1beta/models/"
-		rest := strings.TrimPrefix(r.URL.Path, prefix)
-		parts := strings.SplitN(rest, ":", 2)
-		return parts[0]
-	}
-
-	// 2. 自定义 header（如果客户端愿意传）
-	if model := r.Header.Get("X-Model-Name"); model != "" {
-		return model
-	}
-
-	// 3. POST JSON body 里拿
-	if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/v1/") {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			return ""
-		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
-
-		var partial struct {
-			Model string `json:"model"`
-		}
-		if err := json.Unmarshal(body, &partial); err != nil {
-			return ""
-		}
-		return partial.Model
-	}
-	return ""
 }
 
 func corsMiddleware() func(http.Handler) http.Handler {
@@ -274,7 +248,6 @@ func authMiddleware(apiToken string) func(http.Handler) http.Handler {
 		})
 	}
 }
-
 
 func adminAuthMiddleware(adminToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
