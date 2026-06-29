@@ -122,6 +122,7 @@ func (e *Engine) getResponseDefaultAction(channelID, model string) config.Header
 var safetyDropHeaders = []string{
 	"authorization",
 	"cookie",
+	"x-api-key",
 }
 
 var safetyDropWildcardPatterns = []string{

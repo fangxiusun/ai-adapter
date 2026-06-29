@@ -23,6 +23,7 @@ type RetryState struct {
 	start        time.Time
 	excluded     map[string]bool
 	maxRounds    int
+	rounds       int
 	retryDelay   time.Duration
 	maxTotalWait time.Duration
 	lastResult           *UpstreamResult
@@ -73,9 +74,13 @@ func (h *ProxyHandler) getNextKey(ch *channel.Channel, rs *RetryState) *channel.
 	return nil
 }
 
-// checkRotationAndTimeout checks if the retry loop should stop due to timeout.
-// Returns a FailoverError if timeout reached, nil otherwise.
+// checkRotationAndTimeout checks if the retry loop should stop due to timeout or max rounds.
+// Returns a FailoverError if limit reached, nil otherwise.
 func (h *ProxyHandler) checkRotationAndTimeout(ch *channel.Channel, rs *RetryState, reqID string) *FailoverError {
+	rs.rounds++
+	if rs.maxRounds > 0 && rs.rounds > rs.maxRounds {
+		return &FailoverError{StatusCode: 503, Message: fmt.Sprintf("channel %s: max rotation rounds exceeded (%d)", ch.Config.ID, rs.maxRounds)}
+	}
 	if rs.isTimedOut() {
 		return &FailoverError{StatusCode: 504, Message: fmt.Sprintf("channel %s: max total wait exceeded (%dms)", ch.Config.ID, rs.maxTotalWait.Milliseconds())}
 	}

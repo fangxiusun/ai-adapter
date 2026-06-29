@@ -1,7 +1,6 @@
 package web
 
 import (
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"bytes"
 	"encoding/json"
 	"net/http"
@@ -9,12 +8,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"gopkg.in/yaml.v3"
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/db"
 	"github.com/fangxiusun/ai-adapter/internal/stats"
+	"github.com/fangxiusun/ai-adapter/internal/util"
 	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
 
@@ -26,6 +28,7 @@ type WebHandler struct {
 	wsHub    *websocket.Hub
 	version  string
 }
+
 func NewWebHandler(channels *channel.ChannelManager, database *db.DB, cfg *config.Config, statsInstance *stats.Stats, hub *websocket.Hub, version string) *WebHandler {
 	return &WebHandler{channels: channels, db: database, config: cfg, stats: statsInstance, wsHub: hub, version: version}
 }
@@ -59,11 +62,11 @@ func (h *WebHandler) handleChannels(w http.ResponseWriter, r *http.Request) {
 		channels := h.channels.ListChannels()
 		var list []map[string]interface{}
 		for _, ch := range channels {
-			stats := ch.KeyPool().GetStats()
+			stats := maskKeyStats(ch.KeyPool().GetStats())
 			list = append(list, map[string]interface{}{
-				"id":            ch.Config.ID,
-				"name":          ch.Config.Name,
-				"proxy_id":      ch.Config.ProxyID,
+				"id":       ch.Config.ID,
+				"name":     ch.Config.Name,
+				"proxy_id": ch.Config.ProxyID,
 				"chat_url": ch.Config.ChatURL, "responses_url": ch.Config.ResponsesURL, "messages_url": ch.Config.MessagesURL, "generate_content_url": ch.Config.GenerateContentURL,
 				"enabled":       ch.Config.Enabled,
 				"default_model": ch.Config.DefaultModel,
@@ -116,11 +119,11 @@ func (h *WebHandler) handleChannelByID(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		stats := ch.KeyPool().GetStats()
+		stats := maskKeyStats(ch.KeyPool().GetStats())
 		h.json(w, 200, map[string]interface{}{
-			"id":            ch.Config.ID,
-			"name":          ch.Config.Name,
-			"proxy_id":      ch.Config.ProxyID,
+			"id":       ch.Config.ID,
+			"name":     ch.Config.Name,
+			"proxy_id": ch.Config.ProxyID,
 			"chat_url": ch.Config.ChatURL, "responses_url": ch.Config.ResponsesURL, "messages_url": ch.Config.MessagesURL, "generate_content_url": ch.Config.GenerateContentURL,
 			"enabled":       ch.Config.Enabled,
 			"default_model": ch.Config.DefaultModel,
@@ -148,7 +151,7 @@ func (h *WebHandler) handleChannelTest(w http.ResponseWriter, ch *channel.Channe
 func (h *WebHandler) handleChannelKeys(w http.ResponseWriter, r *http.Request, ch *channel.Channel) {
 	switch r.Method {
 	case "GET":
-		stats := ch.KeyPool().GetStats()
+		stats := maskKeyStats(ch.KeyPool().GetStats())
 		h.json(w, 200, map[string]interface{}{"keys": stats})
 	case "POST":
 		var body struct {
@@ -205,7 +208,7 @@ func (h *WebHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 	channels := h.channels.ListChannels()
 	var channelStats []map[string]interface{}
 	for _, ch := range channels {
-		stats := ch.KeyPool().GetStats()
+		stats := maskKeyStats(ch.KeyPool().GetStats())
 		channelStats = append(channelStats, map[string]interface{}{
 			"id":                   ch.Config.ID,
 			"name":                 ch.Config.Name,
@@ -271,9 +274,9 @@ func (h *WebHandler) handleValidKeys(w http.ResponseWriter, r *http.Request) {
 		Name  string `yaml:"name"`
 	}
 	type channelEntry struct {
-		ID    string     `yaml:"id"`
-		Name  string     `yaml:"name"`
-		Keys  []keyEntry `yaml:"keys"`
+		ID   string     `yaml:"id"`
+		Name string     `yaml:"name"`
+		Keys []keyEntry `yaml:"keys"`
 	}
 	var result struct {
 		Channels []channelEntry `yaml:"channels"`
@@ -323,10 +326,15 @@ func (h *WebHandler) jsonError(w http.ResponseWriter, status int, code, message 
 	})
 }
 
-
-
-
-
+// maskKeyStats masks the Value field in KeyStats to prevent API key leakage.
+func maskKeyStats(stats []channel.KeyStats) []channel.KeyStats {
+	masked := make([]channel.KeyStats, len(stats))
+	copy(masked, stats)
+	for i := range masked {
+		masked[i].Value = util.MaskKey(masked[i].Value)
+	}
+	return masked
+}
 
 // handleStatsHistory returns historical stats for charts.
 func (h *WebHandler) handleStatsHistory(w http.ResponseWriter, r *http.Request) {
@@ -371,6 +379,7 @@ func (h *WebHandler) handleBatchKeys(w http.ResponseWriter, r *http.Request, ch 
 		h.jsonError(w, 405, "method_not_allowed", "use POST")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	var req struct {
 		Action string   `json:"action"`
 		Keys   []string `json:"keys"`
@@ -447,6 +456,7 @@ func (h *WebHandler) handleImportKeys(w http.ResponseWriter, r *http.Request, ch
 		h.jsonError(w, 405, "method_not_allowed", "use POST")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // 2MB limit
 	var req struct {
 		Keys []struct {
 			Name  string `yaml:"name"`
@@ -486,10 +496,3 @@ func (h *WebHandler) handleImportKeys(w http.ResponseWriter, r *http.Request, ch
 		"errors":  errors,
 	})
 }
-
-
-
-
-
-
-
