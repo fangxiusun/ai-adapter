@@ -54,3 +54,4 @@ tools/logs/
 tools/keys.txt
 
 workspace/
+.tmp/

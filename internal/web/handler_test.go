@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -96,5 +97,26 @@ func TestHandleConfigMasksSensitiveServerTokens(t *testing.T) {
 	}
 	if strings.Contains(got.Proxies[0].URL, "secret") {
 		t.Fatalf("proxy url leaked raw credentials: %q", got.Proxies[0].URL)
+	}
+}
+
+func TestStaticHandlerServesCleanIndexHTML(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	StaticHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "`n") {
+		t.Fatal("index.html contains literal `n pollution")
+	}
+
+	scriptSequence := regexp.MustCompile(`</script>\s*<script defer src="https://cdn\.jsdelivr\.net/npm/alpinejs@3\.x\.x/dist/cdn\.min\.js"></script>`)
+	if !scriptSequence.MatchString(body) {
+		t.Fatal("index.html does not contain a valid script tag sequence for chart.js and alpine.js")
 	}
 }
