@@ -3,6 +3,7 @@ package channel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,21 +61,16 @@ func (ch *Channel) Fanout(ctx context.Context, req FanoutRequest) *FanoutResult 
 	}()
 
 	if !ch.FanoutWaitAll() {
-		// Return the first successful result, cancel the rest.
+		// Return the first successful result, but keep draining losers so
+		// key health/error statistics stay accurate.
 		for result := range results {
-			if result.Error == nil && result.StatusCode >= 200 && result.StatusCode < 300 {
-				ch.ReportSuccess(result.Key)
+			if isSuccessfulFanoutResult(result) {
+				ch.reportFanoutResult(result, false)
 				cancel()
+				go ch.drainFanoutResults(results, true)
 				return result
 			}
-		}
-		// All failed — report errors for all keys used.
-		for result := range results {
-			if result.Error != nil {
-				ch.ReportError(result.Key, 0)
-			} else {
-				ch.ReportError(result.Key, result.StatusCode)
-			}
+			ch.reportFanoutResult(result, false)
 		}
 		return &FanoutResult{Error: fmt.Errorf("all fanout keys failed")}
 	}
@@ -114,13 +110,37 @@ func (ch *Channel) Fanout(ctx context.Context, req FanoutRequest) *FanoutResult 
 
 	// All failed.
 	for _, result := range all {
-		if result.Error != nil {
-			ch.ReportError(result.Key, 0)
-		} else {
-			ch.ReportError(result.Key, result.StatusCode)
-		}
+		ch.reportFanoutResult(result, false)
 	}
 	return &FanoutResult{Error: fmt.Errorf("all fanout keys failed")}
+}
+
+func isSuccessfulFanoutResult(result *FanoutResult) bool {
+	return result != nil && result.Error == nil && result.StatusCode >= 200 && result.StatusCode < 300
+}
+
+func (ch *Channel) reportFanoutResult(result *FanoutResult, skipCanceled bool) {
+	if result == nil {
+		return
+	}
+	if result.Error != nil {
+		if skipCanceled && errors.Is(result.Error, context.Canceled) {
+			return
+		}
+		ch.ReportError(result.Key, 0)
+		return
+	}
+	if result.StatusCode >= 200 && result.StatusCode < 300 {
+		ch.ReportSuccess(result.Key)
+		return
+	}
+	ch.ReportError(result.Key, result.StatusCode)
+}
+
+func (ch *Channel) drainFanoutResults(results <-chan *FanoutResult, skipCanceled bool) {
+	for result := range results {
+		ch.reportFanoutResult(result, skipCanceled)
+	}
 }
 
 // sendFanoutRequest sends a single request with the given key.
@@ -157,7 +177,6 @@ func (ch *Channel) sendFanoutRequest(ctx context.Context, key *KeyEntry, req Fan
 		StatusCode: resp.StatusCode,
 	}
 }
-
 
 // FanoutStreamResult holds the result of a streaming fanout attempt.
 type FanoutStreamResult struct {
