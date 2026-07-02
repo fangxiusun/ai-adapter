@@ -191,8 +191,13 @@ func (h *WebHandler) handleLogs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
-	if limit == 0 {
+	if limit <= 0 {
 		limit = 100
+	} else if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
 	logs, err := h.db.QueryLogs(channelID, statusMin, statusMax, from, to, limit, offset)

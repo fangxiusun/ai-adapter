@@ -238,7 +238,7 @@
                     <option value="4xx">4xx 客户端错误</option>
                     <option value="5xx">5xx 服务端错误</option>
                 </select>
-                <input type="number" x-model.number="logFilter.limit" placeholder="数量" min="1" max="500" style="width:80px" @change="loadLogs()">
+                <input type="number" x-model.number="logFilter.limit" placeholder="数量" min="1" max="1000" style="width:80px" @change="loadLogs()">
                 <button class="btn btn-primary" @click="loadLogs()">查询</button>
             </div>
 
@@ -607,7 +607,8 @@
 
             async loadLogs() {
                 try {
-                    let url = '/admin/api/logs?limit=' + (this.logFilter.limit || 50);
+                    let limit = Math.min(Math.max(this.logFilter.limit || 50, 1), 1000);
+                    let url = '/admin/api/logs?limit=' + limit;
                     if (this.logFilter.channel) url += '&channel=' + this.logFilter.channel;
                     if (this.logFilter.status === '2xx') { url += '&statusMin=200&statusMax=299'; }
                     else if (this.logFilter.status === '4xx') { url += '&statusMin=400&statusMax=499'; }
