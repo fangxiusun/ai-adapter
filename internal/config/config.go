@@ -26,11 +26,12 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Host                 string `yaml:"host" json:"host"`
-	Port                 int    `yaml:"port" json:"port"`
-	APIToken             string `yaml:"api_token" json:"api_token"`
-	AdminToken           string `yaml:"admin_token" json:"admin_token"`
-	MaxRequestBodySizeMB int    `yaml:"max_request_body_size_mb" json:"max_request_body_size_mb"`
+	Host                 string   `yaml:"host" json:"host"`
+	Port                 int      `yaml:"port" json:"port"`
+	APIToken             string   `yaml:"api_token" json:"api_token"`
+	AdminToken           string   `yaml:"admin_token" json:"admin_token"`
+	AdminAllowedOrigins  []string `yaml:"admin_allowed_origins" json:"admin_allowed_origins"`
+	MaxRequestBodySizeMB int      `yaml:"max_request_body_size_mb" json:"max_request_body_size_mb"`
 }
 
 type LoggingConfig struct {

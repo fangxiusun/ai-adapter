@@ -4,6 +4,10 @@ server:
   api_token: ""
   # Admin API token (protects /admin/api/ routes, falls back to api_token if empty)
   admin_token: ""
+  # Allowed cross-origin origins for /admin/api/* and /admin/api/ws.
+  # Leave empty to disable admin cross-origin access by default.
+  # admin_allowed_origins:
+  #   - "https://admin.example.com"
   # Maximum request body size in MB (default: 64). Requests larger than this will be truncated.
   # max_request_body_size_mb: 64
 

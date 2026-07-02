@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -84,8 +84,7 @@ func main() {
 	defer database.Close()
 
 	// Initialize WebSocket Hub
-
-	wsHub := websocket.NewHub()
+	wsHub := websocket.NewHub(cfg.Server.AdminAllowedOrigins)
 	go wsHub.Run()
 
 	// Start heartbeat with active request count
@@ -94,7 +93,6 @@ func main() {
 	})
 
 	// Initialize Stats
-
 	statsInstance := stats.NewStats()
 
 	// Start periodic metrics broadcaster (every 5 seconds)
@@ -126,7 +124,7 @@ func main() {
 
 	middleware := chainMiddleware(mux,
 		loggingMiddleware(logger),
-		corsMiddleware(),
+		corsMiddleware(cfg.Server.AdminAllowedOrigins),
 		authMiddleware(cfg.Server.APIToken),
 		adminAuthMiddleware(cfg.Server.AdminToken),
 	)
@@ -203,19 +201,71 @@ func loggingMiddleware(logger *applog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-func corsMiddleware() func(http.Handler) http.Handler {
+func corsMiddleware(adminAllowedOrigins []string) func(http.Handler) http.Handler {
+	adminOriginAllowlist := newOriginAllowlist(adminAllowedOrigins)
+	const proxyAllowHeaders = "Content-Type, Authorization, x-api-key, anthropic-version"
+	const adminAllowHeaders = "Content-Type, Authorization, X-Admin-Token"
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version")
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(204)
-				return
+			switch {
+			case isProxyAPIPath(r.URL.Path):
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", proxyAllowHeaders)
+				if r.Method == http.MethodOptions {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			case isAdminAPIPath(r.URL.Path):
+				origin := r.Header.Get("Origin")
+				originAllowed := isOriginAllowed(origin, adminOriginAllowlist)
+				if originAllowed {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Headers", adminAllowHeaders)
+					w.Header().Add("Vary", "Origin")
+				}
+				if r.Method == http.MethodOptions {
+					if !originAllowed {
+						w.WriteHeader(http.StatusForbidden)
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func isProxyAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/")
+}
+
+func isAdminAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/admin/api/")
+}
+
+func newOriginAllowlist(origins []string) map[string]struct{} {
+	allowlist := make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		allowlist[origin] = struct{}{}
+	}
+	return allowlist
+}
+
+func isOriginAllowed(origin string, allowlist map[string]struct{}) bool {
+	if origin == "" {
+		return false
+	}
+	_, ok := allowlist[origin]
+	return ok
 }
 
 func authMiddleware(apiToken string) func(http.Handler) http.Handler {
