@@ -371,7 +371,8 @@
                 <div class="card-header"><span class="card-title">服务器配置</span></div>
                 <div class="card-body">
                     <div class="info-row"><span class="info-key">监听地址</span><span class="mono" x-text="configData.server?.host + ':' + configData.server?.port"></span></div>
-                    <div class="info-row"><span class="info-key">API Token</span><span x-text="configData.server?.api_token ? '已设置' : '未设置（无认证）'"></span></div>
+                    <div class="info-row"><span class="info-key">API Token</span><span x-text="configData.server?.api_token_configured ? '已设置' : '未设置（无认证）'"></span></div>
+                    <div class="info-row"><span class="info-key">管理 Token</span><span x-text="configData.server?.admin_token_configured ? '已单独设置' : (configData.server?.api_token_configured ? '未单独设置（继承 API Token）' : '未设置（无认证）')"></span></div>
                 </div>
             </div>
             <div class="card card-full">

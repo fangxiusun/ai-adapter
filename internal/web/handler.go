@@ -228,6 +228,52 @@ func (h *WebHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type adminConfigServerDTO struct {
+	Host                 string `json:"host"`
+	Port                 int    `json:"port"`
+	MaxRequestBodySizeMB int    `json:"max_request_body_size_mb"`
+	APITokenConfigured   bool   `json:"api_token_configured"`
+	AdminTokenConfigured bool   `json:"admin_token_configured"`
+}
+
+type adminConfigLoggingDTO struct {
+	Level          string `json:"level"`
+	File           string `json:"file"`
+	MaxSizeMB      int    `json:"max_size_mb"`
+	MaxBackups     int    `json:"max_backups"`
+	LogRequestBody bool   `json:"log_request_body"`
+	LogIO          bool   `json:"log_io"`
+	MaxAgeDays     int    `json:"max_age_days"`
+	Compress       bool   `json:"compress"`
+}
+
+func buildAdminServerConfigDTO(cfg config.ServerConfig) adminConfigServerDTO {
+	return adminConfigServerDTO{
+		Host:                 cfg.Host,
+		Port:                 cfg.Port,
+		MaxRequestBodySizeMB: cfg.MaxRequestBodySizeMB,
+		APITokenConfigured:   isSecretConfigured(cfg.APIToken),
+		AdminTokenConfigured: isSecretConfigured(cfg.AdminToken),
+	}
+}
+
+func buildAdminLoggingConfigDTO(cfg config.LoggingConfig) adminConfigLoggingDTO {
+	return adminConfigLoggingDTO{
+		Level:          cfg.Level,
+		File:           cfg.File,
+		MaxSizeMB:      cfg.MaxSizeMB,
+		MaxBackups:     cfg.MaxBackups,
+		LogRequestBody: cfg.LogRequestBody,
+		LogIO:          cfg.LogIO,
+		MaxAgeDays:     cfg.MaxAgeDays,
+		Compress:       cfg.Compress,
+	}
+}
+
+func isSecretConfigured(secret string) bool {
+	return util.MaskKey(secret) != ""
+}
+
 func (h *WebHandler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		var proxies []map[string]interface{}
@@ -240,8 +286,8 @@ func (h *WebHandler) handleConfig(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		h.json(w, 200, map[string]interface{}{
-			"server":   h.config.Server,
-			"logging":  h.config.Logging,
+			"server":   buildAdminServerConfigDTO(h.config.Server),
+			"logging":  buildAdminLoggingConfigDTO(h.config.Logging),
 			"channels": len(h.config.Channels),
 			"proxies":  proxies,
 		})
