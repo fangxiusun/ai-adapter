@@ -1,9 +1,9 @@
 package proxy
 
 import (
-	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"encoding/json"
 	"fmt"
+	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"io"
 	"net/http"
 	"strings"
@@ -245,8 +245,6 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 	return h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
 }
 
-
-
 // failoverLoop tries dispatching to each candidate channel in order.
 // On failoverable errors, it moves to the next channel.
 // On success or non-failoverable errors, it returns immediately.
@@ -263,7 +261,9 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 			upstreamModel = mi.ID
 		}
 		rawBody = replaceModelInBody(rawBody, clientModel, upstreamModel)
-		h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, rawBody, targetReq, deepLog)
+		if failErr := h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, rawBody, targetReq, deepLog); failErr != nil {
+			h.sendError(w, reqID, failErr.StatusCode, "channel_dispatch_failed", failErr.Message)
+		}
 		return
 	}
 
