@@ -3,11 +3,13 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/fangxiusun/ai-adapter/internal/metrics"
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
@@ -78,6 +80,92 @@ func (h *ProxyHandler) readRequestBody(w http.ResponseWriter, reqID string, r *h
 }
 
 // ==================== Entry Points ====================
+
+func (h *ProxyHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.sendError(w, "", 405, "method_not_allowed", "GET is required for /v1/models")
+		return
+	}
+
+	now := time.Now().Unix()
+	type modelItem struct {
+		ID              string   `json:"id"`
+		Name            string   `json:"name"`
+		Object          string   `json:"object"`
+		Created         int64    `json:"created"`
+		OwnedBy         string   `json:"owned_by"`
+		ContextLength   int      `json:"context_length"`
+		MaxOutputLength int      `json:"max_output_length"`
+		Aliases         []string `json:"aliases"`
+	}
+
+	seen := make(map[string]struct{})
+	var items []modelItem
+	for _, ch := range h.channels.ListChannels() {
+		if !ch.Config.Enabled {
+			continue
+		}
+		for _, m := range ch.Config.Models {
+			id := m.ID
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+
+			name := m.DisplayName
+			if name == "" {
+				name = id
+			}
+			contextWindow := m.ContextWindow
+			if contextWindow <= 0 {
+				contextWindow = 0
+			}
+			maxOutputTokens := m.MaxOutputTokens
+			if maxOutputTokens <= 0 {
+				maxOutputTokens = 0
+			}
+
+			aliases := m.Aliases
+			if aliases == nil {
+				aliases = []string{}
+			}
+
+			items = append(items, modelItem{
+				ID:              id,
+				Name:            name,
+				Object:          "model",
+				Created:         now,
+				OwnedBy:         ch.Config.ID,
+				ContextLength:   contextWindow,
+				MaxOutputLength: maxOutputTokens,
+				Aliases:         aliases,
+			})
+		}
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].OwnedBy == items[j].OwnedBy {
+			return items[i].ID < items[j].ID
+		}
+		return items[i].OwnedBy < items[j].OwnedBy
+	})
+
+	if items == nil {
+		items = make([]modelItem, 0)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"data":    items,
+		"object":  "list",
+		"success": true,
+	}); err != nil {
+		h.logger.Error("write_models_failed", "error", err)
+	}
+}
 
 func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	metrics.IncActiveRequests()

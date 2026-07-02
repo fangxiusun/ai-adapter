@@ -1,4 +1,4 @@
-﻿# ai-adapter
+# ai-adapter
 
 A high-performance Go proxy that translates between four major LLM API protocols, enabling any client to work with any LLM provider.
 
@@ -85,6 +85,7 @@ See `config.example.yaml` for full documentation.
 | `POST /v1/messages` | Anthropic Claude Messages |
 | `POST /v1beta/models/{model}:generateContent` | Gemini (non-stream) |
 | `POST /v1beta/models/{model}:streamGenerateContent` | Gemini (stream) |
+| `GET /v1/models` | List available models |
 | `GET /` | Admin Web UI |
 | `GET /admin/api/stats` | Statistics |
 | `GET /admin/api/channels` | Channel list |

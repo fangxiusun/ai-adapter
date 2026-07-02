@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -119,6 +119,7 @@ func main() {
 	mux.HandleFunc("/v1/messages", proxyHandler.HandleMessages)
 	mux.HandleFunc("/v1beta/models/", proxyHandler.HandleGenerateContent)
 	webHandler.RegisterRoutes(mux)
+	mux.HandleFunc("/v1/models", proxyHandler.HandleModels)
 	debugHandler := debug.NewHandler(channels, cfg)
 	debugHandler.RegisterRoutes(mux)
 
@@ -146,6 +147,7 @@ func main() {
 			fmt.Printf("Deep Debug: ENABLED (logs in ./debug_logs/)\n")
 		}
 		fmt.Printf("API endpoints:\n")
+		fmt.Printf("  GET  /v1/models           (List Models)\n")
 		fmt.Printf("  POST /v1/chat/completions  (OpenAI Chat)\n")
 		fmt.Printf("  POST /v1/responses         (OpenAI Responses)\n")
 		fmt.Printf("  POST /v1/messages          (Anthropic Claude)\n")
