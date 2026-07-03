@@ -318,19 +318,27 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 			fmt.Sprintf("channel %s has no native interface and no conversion path to %s", ch.Config.ID, target))
 		return nil
 	}
-	h.logger.Debug("dispatch", "request_id", reqID, "target", target, "source", source, "native", source == target)
+	upstreamModel := model
+	if mi, ok := ch.ResolveModel(model); ok && mi.ID != "" {
+		upstreamModel = mi.ID
+	}
+
+	h.logger.Debug("dispatch", "request_id", reqID, "target", target, "source", source, "native", source == target, "model", model)
 	if source == target {
+		rawBody = replaceModelInBody(rawBody, model, upstreamModel)
+		h.logger.Debug("dispatch_replaceModelInBody", "channel", ch.Config.ID, "clientModel", model, "upstreamModel", upstreamModel)
 		return h.nativeForward(w, r, reqID, ch, source, rawBody, model, stream, deepLog)
 	}
-	chatReq, err := h.buildChatRequest(target, targetReq, model, stream)
+	chatReq, err := h.buildChatRequest(target, targetReq, upstreamModel, stream)
+	h.logger.Debug("dispatch_buildChatRequest", "channel", ch.Config.ID, "clientModel", model, "upstreamModel", upstreamModel)
 	if err != nil {
 		h.sendError(w, reqID, 400, "convert_failed", err.Error())
 		return nil
 	}
 	if stream {
-		return h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
+		return h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, upstreamModel, targetReq, deepLog)
 	}
-	return h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
+	return h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, upstreamModel, targetReq, deepLog)
 }
 
 // failoverLoop tries dispatching to each candidate channel in order.
@@ -344,12 +352,8 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 	if !fc.Enabled || len(candidates) <= 1 {
 		// No failover — use balanced selection
 		ch := h.channels.SelectBalanced(candidates)
-		upstreamModel := clientModel
-		if mi, ok := ch.ResolveModel(clientModel); ok && mi.ID != "" {
-			upstreamModel = mi.ID
-		}
-		rawBody = replaceModelInBody(rawBody, clientModel, upstreamModel)
-		if failErr := h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, rawBody, targetReq, deepLog); failErr != nil {
+
+		if failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog); failErr != nil {
 			h.sendError(w, reqID, failErr.StatusCode, "channel_dispatch_failed", failErr.Message)
 		}
 		return
@@ -374,14 +378,8 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 			continue
 		}
 
-		upstreamModel := clientModel
-		if mi, ok := ch.ResolveModel(clientModel); ok && mi.ID != "" {
-			upstreamModel = mi.ID
-		}
-		dispatchBody := replaceModelInBody(rawBody, clientModel, upstreamModel)
-
 		h.logger.Debug("failover_attempt", "request_id", reqID, "channel", ch.Config.ID, "attempt", tried+1)
-		failErr := h.dispatch(w, r, reqID, ch, target, upstreamModel, stream, dispatchBody, targetReq, deepLog)
+		failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog)
 
 		if failErr == nil {
 			// Success or non-failoverable error already handled
@@ -411,11 +409,11 @@ func (h *ProxyHandler) buildChatRequest(target config.InterfaceType, targetReq i
 	case config.InterfaceChat:
 		return targetReq.(*translate.ChatRequest), nil
 	case config.InterfaceResponses:
-		return translate.ReqToChat(targetReq.(*translate.ResponsesRequest), translate.TranslateOpts{ForceParallelTools: true})
+		return translate.ReqToChat(targetReq.(*translate.ResponsesRequest), translate.TranslateOpts{ForceParallelTools: true}, model)
 	case config.InterfaceMessages:
-		return translate.ClaudeToChatRequest(targetReq.(*translate.ClaudeRequest))
+		return translate.ClaudeToChatRequest(targetReq.(*translate.ClaudeRequest), model)
 	case config.InterfaceGenerateContent:
-		req, err := translate.GeminiToChatRequest(targetReq.(*translate.GeminiRequest))
+		req, err := translate.GeminiToChatRequest(targetReq.(*translate.GeminiRequest), model)
 		if req != nil {
 			req.Model = model
 			req.Stream = stream

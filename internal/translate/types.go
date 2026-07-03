@@ -36,7 +36,7 @@ type ResponsesInputItem struct {
 	Content          interface{}            `json:"content,omitempty"`
 	CallID           string                 `json:"call_id,omitempty"`
 	Name             string                 `json:"name,omitempty"`
-	Arguments        string                 `json:"arguments,omitempty"`
+	Arguments        interface{}            `json:"arguments,omitempty"`
 	Output           interface{}            `json:"output,omitempty"`
 	Summary          []ReasoningSummaryPart `json:"summary,omitempty"`
 	EncryptedContent *string                `json:"encrypted_content,omitempty"`

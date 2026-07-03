@@ -89,7 +89,7 @@ func ChatToGeminiRequest(req *ChatRequest) (*GeminiRequest, error) {
 }
 
 // GeminiToChatRequest converts a Gemini request to an OpenAI Chat request.
-func GeminiToChatRequest(req *GeminiRequest) (*ChatRequest, error) {
+func GeminiToChatRequest(req *GeminiRequest, model string) (*ChatRequest, error) {
 	chat := &ChatRequest{}
 
 	// System instruction.
@@ -268,12 +268,12 @@ func PipeChatStreamToGemini(ctx context.Context, upstream io.Reader, sink io.Wri
 }
 
 type geminiStreamState struct {
-	model          string
-	textBuffer     string
-	toolCalls      []geminiToolCallState
-	finishReason   string
-	inputTokens    int
-	outputTokens   int
+	model        string
+	textBuffer   string
+	toolCalls    []geminiToolCallState
+	finishReason string
+	inputTokens  int
+	outputTokens int
 }
 
 type geminiToolCallState struct {

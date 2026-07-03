@@ -15,8 +15,8 @@ import (
 // ChatToClaudeRequest converts an OpenAI Chat request to a Claude request.
 func ChatToClaudeRequest(req *ChatRequest) (*ClaudeRequest, error) {
 	claude := &ClaudeRequest{
-		Model:   req.Model,
-		Stream:  req.Stream,
+		Model:       req.Model,
+		Stream:      req.Stream,
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 	}
@@ -90,9 +90,9 @@ func ChatToClaudeRequest(req *ChatRequest) (*ClaudeRequest, error) {
 }
 
 // ClaudeToChatRequest converts a Claude request to an OpenAI Chat request.
-func ClaudeToChatRequest(req *ClaudeRequest) (*ChatRequest, error) {
+func ClaudeToChatRequest(req *ClaudeRequest, model string) (*ChatRequest, error) {
 	chat := &ChatRequest{
-		Model:  req.Model,
+		Model:  model,
 		Stream: req.Stream,
 	}
 	chat.Temperature = req.Temperature
@@ -324,17 +324,17 @@ func PipeChatStreamToClaude(ctx context.Context, upstream io.Reader, sink io.Wri
 }
 
 type claudeStreamState struct {
-	responseID     string
-	model          string
-	blockIndex     int
-	blockOpen      bool
-	blockType      string // "text" or "tool_use"
-	toolCallID     string
-	toolName       string
-	finishReason   string
-	inputTokens    int
-	outputTokens   int
-	finalContent   []ClaudeContentBlock
+	responseID   string
+	model        string
+	blockIndex   int
+	blockOpen    bool
+	blockType    string // "text" or "tool_use"
+	toolCallID   string
+	toolName     string
+	finishReason string
+	inputTokens  int
+	outputTokens int
+	finalContent []ClaudeContentBlock
 }
 
 func processChatChunkToClaude(w *sseWriter, st *claudeStreamState, chunk *ChatStreamChunk) {
@@ -352,7 +352,7 @@ func processChatChunkToClaude(w *sseWriter, st *claudeStreamState, chunk *ChatSt
 		if !st.blockOpen || st.blockType != "text" {
 			closeBlock(w, st)
 			w.writeEvent("content_block_start", map[string]interface{}{
-				"index": st.blockIndex,
+				"index":         st.blockIndex,
 				"content_block": map[string]interface{}{"type": "text", "text": ""},
 			})
 			st.blockOpen = true
@@ -461,14 +461,14 @@ func PipeClaudeStreamToChat(ctx context.Context, upstream io.Reader, sink io.Wri
 }
 
 type chatFromClaudeStreamState struct {
-	responseID    string
-	model         string
-	content       string
-	reasoning     string
-	toolCalls     map[int]*toolCallAccumulator
-	finishReason  string
-	outputTokens  int
-	inputTokens   int
+	responseID   string
+	model        string
+	content      string
+	reasoning    string
+	toolCalls    map[int]*toolCallAccumulator
+	finishReason string
+	outputTokens int
+	inputTokens  int
 }
 
 type toolCallAccumulator struct {
@@ -869,7 +869,7 @@ func claudeToolChoiceToChat(tc interface{}) interface{} {
 			name, _ := v["name"].(string)
 			if name != "" {
 				return map[string]interface{}{
-					"type": "function",
+					"type":     "function",
 					"function": map[string]interface{}{"name": name},
 				}
 			}

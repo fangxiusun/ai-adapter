@@ -406,7 +406,7 @@ func (h *Handler) convertRequest(source, target config.InterfaceType, model stri
 		}
 		req.Model = model
 		req.Stream = stream
-		chatReq, err := translate.ReqToChat(&req, translate.TranslateOpts{ForceParallelTools: true})
+		chatReq, err := translate.ReqToChat(&req, translate.TranslateOpts{ForceParallelTools: true}, model)
 		if err != nil {
 			return nil, err
 		}
@@ -418,7 +418,7 @@ func (h *Handler) convertRequest(source, target config.InterfaceType, model stri
 			return nil, err
 		}
 		req.Model = model
-		chatReq, err := translate.ClaudeToChatRequest(&req)
+		chatReq, err := translate.ClaudeToChatRequest(&req, model)
 		if err != nil {
 			return nil, err
 		}
@@ -430,7 +430,7 @@ func (h *Handler) convertRequest(source, target config.InterfaceType, model stri
 		if err := json.Unmarshal(body, &req); err != nil {
 			return nil, err
 		}
-		chatReq, err := translate.GeminiToChatRequest(&req)
+		chatReq, err := translate.GeminiToChatRequest(&req, model)
 		if err != nil {
 			return nil, err
 		}

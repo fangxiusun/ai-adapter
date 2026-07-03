@@ -8,7 +8,7 @@ import (
 
 const mixedModeReasoningPlaceholder = "(this turn ran without thinking mode)"
 
-func ReqToChat(req *ResponsesRequest, opts TranslateOpts) (*ChatRequest, error) {
+func ReqToChat(req *ResponsesRequest, opts TranslateOpts, model string) (*ChatRequest, error) {
 	messages := []ChatMessage{}
 
 	if req.Instructions != "" {
@@ -28,7 +28,7 @@ func ReqToChat(req *ResponsesRequest, opts TranslateOpts) (*ChatRequest, error) 
 	}
 
 	chat := &ChatRequest{
-		Model:    req.Model,
+		Model:    model,
 		Messages: messages,
 		Stream:   req.Stream,
 	}
@@ -179,10 +179,10 @@ func ReqToResponses(req *ChatRequest, opts TranslateOpts) (*ResponsesRequest, er
 			}
 		case "tool":
 			inputItems = append(inputItems, ResponsesInputItem{
-				Type:      "function_call_output",
-				CallID:    msg.ToolCallID,
-				Output:    msg.Content,
-				Status:    "completed",
+				Type:   "function_call_output",
+				CallID: msg.ToolCallID,
+				Output: msg.Content,
+				Status: "completed",
 			})
 		}
 	}
@@ -205,15 +205,70 @@ func ReqToResponses(req *ChatRequest, opts TranslateOpts) (*ResponsesRequest, er
 }
 
 func parseInputItems(raw []interface{}) ([]ResponsesInputItem, error) {
-	var items []ResponsesInputItem
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return nil, err
+	items := make([]ResponsesInputItem, 0, len(raw))
+
+	for i, r := range raw {
+
+		// https://developers.openai.com/api/reference/resources/responses/methods/create
+		// tool_search_call 的 arguments 不是字符型
+		m, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// 只有 type == tool_search_call 才处理
+		// t, _ := m["type"].(string)
+		// if t == "tool_search_call" {
+		// 	if args, exists := m["arguments"]; exists {
+		// 		s, err := normalizeArgumentsToString(args)
+		// 		if err != nil {
+		// 			return nil, fmt.Errorf("call_id=%v normalize failed: %v\n", m["call_id"], err)
+		// 		}
+		// 		_ = s
+		// 		m["arguments"] = s
+		// 	}
+		// }
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			return nil, fmt.Errorf("marshal input item[%d] failed: %w", i, err)
+		}
+
+		var item ResponsesInputItem
+		if err := json.Unmarshal(data, &item); err != nil {
+			return nil, fmt.Errorf(
+				"parse input item[%d] failed: %w, raw=%s",
+				i,
+				err,
+				truncateJSON(data, 2000),
+			)
+		}
+
+		items = append(items, item)
 	}
-	if err := json.Unmarshal(data, &items); err != nil {
-		return nil, err
-	}
+
 	return items, nil
+}
+
+func normalizeArgumentsToString(v interface{}) (string, error) {
+	switch val := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return val, nil
+	default:
+		b, err := json.Marshal(val)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+}
+
+func truncateJSON(data []byte, max int) string {
+	if len(data) <= max {
+		return string(data)
+	}
+	return string(data[:max]) + "...(truncated)"
 }
 
 type assemblyState struct {
@@ -290,12 +345,21 @@ func inputItemsToMessages(items []ResponsesInputItem, opts TranslateOpts) []Chat
 				state.pendingReasoning = &text
 			}
 		case "function_call":
+			args := ""
+			switch v := item.Arguments.(type) {
+			case string:
+				args = v
+			default:
+				data, _ := json.Marshal(v)
+				args = string(data)
+			}
+
 			state.pendingToolCalls = append(state.pendingToolCalls, ChatToolCall{
 				ID:   item.CallID,
 				Type: "function",
 				Function: FunctionCall{
 					Name:      item.Name,
-					Arguments: SanitizeFunctionCallArguments(item.Arguments),
+					Arguments: SanitizeFunctionCallArguments(args),
 				},
 			})
 		case "function_call_output":
