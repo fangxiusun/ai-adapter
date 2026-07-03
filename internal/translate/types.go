@@ -120,7 +120,7 @@ type TokenDetails struct {
 	// 移除 ResponsesUsageInputTokensDetails.CachedTokens 的 omitempty 标签
 	// 确保即使值为 0 也会被序列化输出
 	CachedTokens    int `json:"cached_tokens"`
-	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type ReasoningResult struct {
