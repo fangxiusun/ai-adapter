@@ -12,12 +12,11 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
-	"github.com/fangxiusun/ai-adapter/internal/util"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
+	"github.com/fangxiusun/ai-adapter/internal/util"
 )
 
 // ==================== Fanout Forwarding ====================
-
 
 // fanoutForward sends the same request to multiple keys concurrently and returns
 // the first successful (or fastest) response. Only for non-streaming requests.
@@ -70,7 +69,6 @@ func (h *ProxyHandler) fanoutForward(w http.ResponseWriter, r *http.Request, req
 	h.logger.LogRequest(reqID, "POST", path, result.StatusCode, latency, result.Key, ch.Config.ID, model)
 	return nil
 }
-
 
 // ==================== Native Forwarding ====================
 
@@ -197,9 +195,9 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			pt, ct, tt, usageJSON = capture.Usage()
 		} else {
 			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
-		if readErr != nil {
-			h.logger.Warn("upstream_body_read_error", "request_id", reqID, "channel", ch.Config.ID, "error", readErr)
-		}
+			if readErr != nil {
+				h.logger.Warn("upstream_body_read_error", "request_id", reqID, "channel", ch.Config.ID, "error", readErr)
+			}
 			deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 			deepLog.LogUpstreamResponseBody(respBody)
 			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
@@ -237,7 +235,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 
 	// Fanout fast-path for converted non-streaming requests.
 	if ch.FanoutEnabled() {
-		return h.fanoutForward(w, r, reqID, ch, source, sourceBody, model, deepLog)
+		return h.convertedFanoutForward(w, r, reqID, ch, source, target, sourceBody, chatReq, model, targetReq, deepLog)
 	}
 
 	path := upstreamPathForInterface(source, model, false)
@@ -363,6 +361,66 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 	return nil
 }
 
+// ==================== Converted Fanout Forwarding (Non-Streaming) ====================
+
+func (h *ProxyHandler) convertedFanoutForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, sourceBody []byte, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
+	path := upstreamPathForInterface(source, model, false)
+	url := ch.Config.NativeBaseURL(source) + path
+
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+	if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
+		applyProcessedHeaders(headers, processed, "Content-Type", "Authorization")
+	}
+
+	deepLog.LogUpstreamRequestHeader("POST", url, headers)
+	deepLog.LogUpstreamRequestBody(sourceBody)
+
+	start := time.Now()
+	result := ch.Fanout(r.Context(), channel.FanoutRequest{
+		Body:    sourceBody,
+		URL:     url,
+		Headers: headers,
+	})
+	latency := time.Since(start).Milliseconds()
+
+	if result.Error != nil {
+		h.logger.Warn("converted_fanout_failed", "request_id", reqID, "channel", ch.Config.ID, "error", result.Error)
+		return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: converted fanout failed: %s", ch.Config.ID, result.Error)}
+	}
+
+	ch.RecordLatency(result.Key, latency)
+
+	deepLog.LogUpstreamResponseHeader(result.StatusCode, nil)
+	deepLog.LogUpstreamResponseBody(result.Response)
+
+	chatResp, err := convertSourceToChat(source, result.Response, chatReq)
+	if err != nil {
+		h.sendError(w, reqID, 502, "convert_from_source_failed", err.Error())
+		return nil
+	}
+	targetResp, err := convertChatToTarget(target, chatResp, targetReq)
+	if err != nil {
+		h.sendError(w, reqID, 500, "convert_to_target_failed", err.Error())
+		return nil
+	}
+
+	if processed := h.processResponseHeaders(ch, model, nil); processed != nil {
+		applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+	}
+	responseBody, _ := json.Marshal(targetResp)
+	deepLog.LogClientResponseHeader(200, w.Header())
+	deepLog.LogClientResponseBody(responseBody)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	json.NewEncoder(w).Encode(targetResp)
+
+	pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
+	h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, latency, result.Key, "", "", pt, ct, tt, usageJSON, string(target))
+	h.logger.LogRequest(reqID, "POST", path, 200, latency, result.Key, ch.Config.ID, model)
+	return nil
+}
+
 // ==================== Converted Forwarding (Streaming) ====================
 
 func (h *ProxyHandler) convertedStreamForward(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
@@ -371,9 +429,3 @@ func (h *ProxyHandler) convertedStreamForward(w http.ResponseWriter, r *http.Req
 	}
 	return h.streamChainConversion(w, r, reqID, ch, source, target, chatReq, model, targetReq, deepLog)
 }
-
-
-
-
-
-

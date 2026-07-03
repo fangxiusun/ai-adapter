@@ -146,17 +146,17 @@ func TestHandleModelsReturnsConfiguredModels(t *testing.T) {
 	}
 
 	var payload struct {
-		Data    []struct {
+		Data []struct {
 			ID              string `json:"id"`
 			Name            string `json:"name"`
 			Object          string `json:"object"`
-			Created         int64 `json:"created"`
+			Created         int64  `json:"created"`
 			OwnedBy         string `json:"owned_by"`
-			ContextLength   int `json:"context_length"`
-			MaxOutputLength int `json:"max_output_length"`
+			ContextLength   int    `json:"context_length"`
+			MaxOutputLength int    `json:"max_output_length"`
 		} `json:"data"`
 		Object  string `json:"object"`
-		Success bool `json:"success"`
+		Success bool   `json:"success"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -193,4 +193,92 @@ func TestHandleModelsReturnsConfiguredModels(t *testing.T) {
 	}
 }
 
+func TestHandleResponsesConvertedFanoutReturnsResponsesFormat(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		if _, ok := payload["messages"]; !ok {
+			t.Fatalf("upstream request should be converted to chat format, got %v", payload)
+		}
 
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":123,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	logger := log.New("error", "", false, false)
+	logger.SetEnabled(false)
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{MaxRequestBodySizeMB: 1},
+		Failover: config.FailoverConfig{
+			Enabled:                  false,
+			MaxChannelAttempts:       1,
+			TotalTimeoutMs:           1000,
+			ConsecutiveFailThreshold: 1,
+		},
+		Channels: []config.ChannelConfig{{
+			ID:               "test-channel",
+			Name:             "test-channel",
+			Enabled:          true,
+			DefaultModel:     "test-model",
+			Models:           []config.ModelConfig{{ID: "test-model", DisplayName: "test-model"}},
+			Keys:             []config.KeyConfig{{Value: "sk-test-1", Name: "key-1"}, {Value: "sk-test-2", Name: "key-2"}},
+			KeyStrategy:      "round-robin",
+			RequestTimeoutMs: 1000,
+			Retry: config.RetryConfig{
+				RetryDelay429Ms:      1,
+				MaxRotationRounds:    1,
+				MaxTotalWaitMs:       1000,
+				ConsecErrorThreshold: 1,
+				PauseMultiplierSec:   1,
+				PauseMaxSec:          1,
+			},
+			Fanout:  config.FanoutConfig{Enabled: true, Count: 2},
+			ChatURL: upstream.URL,
+		}},
+	}
+
+	cm := channel.NewChannelManager(cfg.Channels, nil, logger, nil, "priority")
+	handler := &ProxyHandler{
+		channels:  cm,
+		logger:    logger,
+		config:    cfg,
+		deepDebug: debuglog.New(false),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":"ping"}`))
+	rec := httptest.NewRecorder()
+
+	handler.HandleResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Object string `json:"object"`
+		Output []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v; body=%s", err, rec.Body.String())
+	}
+	if payload.Object != "response" {
+		t.Fatalf("object = %q, want response; body=%s", payload.Object, rec.Body.String())
+	}
+	if len(payload.Output) != 1 || payload.Output[0].Type != "message" || payload.Output[0].Role != "assistant" {
+		t.Fatalf("unexpected output: %+v; body=%s", payload.Output, rec.Body.String())
+	}
+	if len(payload.Output[0].Content) != 1 || payload.Output[0].Content[0].Text != "pong" {
+		t.Fatalf("unexpected content: %+v; body=%s", payload.Output[0].Content, rec.Body.String())
+	}
+}
