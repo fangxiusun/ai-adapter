@@ -449,7 +449,10 @@ func (h *Handler) chatToSource(source config.InterfaceType, req *translate.ChatR
 		return json.Marshal(req)
 
 	case config.InterfaceResponses:
-		respReq := translate.ChatToResponses(req)
+		respReq, err := translate.ReqToResponses(req, translate.TranslateOpts{ForceParallelTools: true})
+		if err != nil {
+			return nil, err
+		}
 		return json.Marshal(respReq)
 
 	case config.InterfaceMessages:
