@@ -5,19 +5,19 @@ package translate
 // ============================================================================
 
 type ResponsesRequest struct {
-	Model             string              `json:"model"`
-	Input             interface{}         `json:"input,omitempty"`
-	Instructions      string              `json:"instructions,omitempty"`
-	Tools             []ResponsesTool     `json:"tools,omitempty"`
-	ToolChoice        interface{}         `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool               `json:"parallel_tool_calls,omitempty"`
-	Temperature       *float64            `json:"temperature,omitempty"`
-	TopP              *float64            `json:"top_p,omitempty"`
-	MaxOutputTokens   *int                `json:"max_output_tokens,omitempty"`
-	Stream            bool                `json:"stream,omitempty"`
-	Reasoning         *ReasoningConfig    `json:"reasoning,omitempty"`
-	Metadata          map[string]string   `json:"metadata,omitempty"`
-	Text              *TextFormat         `json:"text,omitempty"`
+	Model             string            `json:"model"`
+	Input             interface{}       `json:"input,omitempty"`
+	Instructions      string            `json:"instructions,omitempty"`
+	Tools             []ResponsesTool   `json:"tools,omitempty"`
+	ToolChoice        interface{}       `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool             `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64          `json:"temperature,omitempty"`
+	TopP              *float64          `json:"top_p,omitempty"`
+	MaxOutputTokens   *int              `json:"max_output_tokens,omitempty"`
+	Stream            bool              `json:"stream,omitempty"`
+	Reasoning         *ReasoningConfig  `json:"reasoning,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+	Text              *TextFormat       `json:"text,omitempty"`
 }
 
 type ReasoningConfig struct {
@@ -49,10 +49,10 @@ type ReasoningSummaryPart struct {
 }
 
 type ResponsesContentPart struct {
-	Type     string  `json:"type"`
-	Text     string  `json:"text,omitempty"`
-	ImageURL string  `json:"image_url,omitempty"`
-	Detail   string  `json:"detail,omitempty"`
+	Type        string        `json:"type"`
+	Text        string        `json:"text,omitempty"`
+	ImageURL    string        `json:"image_url,omitempty"`
+	Detail      string        `json:"detail,omitempty"`
 	Annotations []interface{} `json:"annotations,omitempty"`
 }
 
@@ -69,34 +69,34 @@ type ResponsesTool struct {
 }
 
 type ResponsesObject struct {
-	ID                string              `json:"id"`
-	Object            string              `json:"object"`
-	CreatedAt         int64               `json:"created_at"`
-	Status            string              `json:"status"`
-	Model             string              `json:"model"`
-	Output            []OutputItem        `json:"output"`
-	Usage             *ResponsesUsage     `json:"usage"`
-	ParallelToolCalls bool                `json:"parallel_tool_calls"`
-	ToolChoice        interface{}         `json:"tool_choice"`
-	Reasoning         *ReasoningResult    `json:"reasoning"`
-	Text              *TextFormat         `json:"text"`
-	IncompleteDetails *IncompleteDetails  `json:"incomplete_details"`
-	Error             *ErrorInfo          `json:"error"`
-	Metadata          map[string]string   `json:"metadata"`
+	ID                string             `json:"id"`
+	Object            string             `json:"object"`
+	CreatedAt         int64              `json:"created_at"`
+	Status            string             `json:"status"`
+	Model             string             `json:"model"`
+	Output            []OutputItem       `json:"output"`
+	Usage             *ResponsesUsage    `json:"usage"`
+	ParallelToolCalls bool               `json:"parallel_tool_calls"`
+	ToolChoice        interface{}        `json:"tool_choice"`
+	Reasoning         *ReasoningResult   `json:"reasoning"`
+	Text              *TextFormat        `json:"text"`
+	IncompleteDetails *IncompleteDetails `json:"incomplete_details"`
+	Error             *ErrorInfo         `json:"error"`
+	Metadata          map[string]string  `json:"metadata"`
 }
 
 type OutputItem struct {
-	Type          string              `json:"type"`
-	ID            string              `json:"id"`
-	CallID        string              `json:"call_id,omitempty"`
-	Name          string              `json:"name,omitempty"`
-	Arguments     string              `json:"arguments,omitempty"`
-	Role          string              `json:"role,omitempty"`
-	Content       []OutputContentPart `json:"content,omitempty"`
-	Summary       []ReasoningSummaryPart `json:"summary,omitempty"`
-	EncryptedContent *string          `json:"encrypted_content,omitempty"`
-	Status        string              `json:"status,omitempty"`
-	Namespace     string              `json:"namespace,omitempty"`
+	Type             string                 `json:"type"`
+	ID               string                 `json:"id"`
+	CallID           string                 `json:"call_id,omitempty"`
+	Name             string                 `json:"name,omitempty"`
+	Arguments        string                 `json:"arguments,omitempty"`
+	Role             string                 `json:"role,omitempty"`
+	Content          []OutputContentPart    `json:"content,omitempty"`
+	Summary          []ReasoningSummaryPart `json:"summary,omitempty"`
+	EncryptedContent *string                `json:"encrypted_content,omitempty"`
+	Status           string                 `json:"status,omitempty"`
+	Namespace        string                 `json:"namespace,omitempty"`
 }
 
 type OutputContentPart struct {
@@ -106,15 +106,20 @@ type OutputContentPart struct {
 }
 
 type ResponsesUsage struct {
-	InputTokens       int `json:"input_tokens"`
-	OutputTokens      int `json:"output_tokens"`
-	TotalTokens       int `json:"total_tokens"`
-	InputTokensDetails *TokenDetails `json:"input_tokens_details,omitempty"`
+	InputTokens         int           `json:"input_tokens"`
+	OutputTokens        int           `json:"output_tokens"`
+	TotalTokens         int           `json:"total_tokens"`
+	InputTokensDetails  *TokenDetails `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails *TokenDetails `json:"output_tokens_details,omitempty"`
 }
 
 type TokenDetails struct {
-	CachedTokens    int `json:"cached_tokens,omitempty"`
+	// https://github.com/MartialBE/one-hub/pull/910
+	// Codex CLI 等客户端在解析 response.completed 事件时
+	// 当 input_tokens_details 对象存在时，强制要求 cached_tokens 字段存在
+	// 移除 ResponsesUsageInputTokensDetails.CachedTokens 的 omitempty 标签
+	// 确保即使值为 0 也会被序列化输出
+	CachedTokens    int `json:"cached_tokens"`
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
@@ -162,19 +167,19 @@ type ThinkingConfig struct {
 }
 
 type ChatMessage struct {
-	Role             string          `json:"role"`
-	Content          interface{}     `json:"content,omitempty"`
-	Name             string          `json:"name,omitempty"`
-	ToolCalls        []ChatToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID       string          `json:"tool_call_id,omitempty"`
-	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	Role             string         `json:"role"`
+	Content          interface{}    `json:"content,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	ReasoningContent *string        `json:"reasoning_content,omitempty"`
 }
 
 type ChatToolCall struct {
-	ID       string         `json:"id"`
-	Type     string         `json:"type"`
-	Function FunctionCall   `json:"function"`
-	Index    int            `json:"index,omitempty"`
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function FunctionCall `json:"function"`
+	Index    int          `json:"index,omitempty"`
 }
 
 type FunctionCall struct {
@@ -183,8 +188,8 @@ type FunctionCall struct {
 }
 
 type ChatTool struct {
-	Type     string         `json:"type"`
-	Function ChatToolDef    `json:"function,omitempty"`
+	Type     string      `json:"type"`
+	Function ChatToolDef `json:"function,omitempty"`
 }
 
 type ChatToolDef struct {
@@ -211,27 +216,27 @@ type ChatChoice struct {
 }
 
 type ChatChoiceMsg struct {
-	Role             string          `json:"role"`
-	Content          *string         `json:"content"`
-	ReasoningContent *string         `json:"reasoning_content,omitempty"`
-	ToolCalls        []ChatToolCall  `json:"tool_calls,omitempty"`
+	Role             string         `json:"role"`
+	Content          *string        `json:"content"`
+	ReasoningContent *string        `json:"reasoning_content,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
 }
 
 type ChatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	PromptTokensDetails *TokenDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int           `json:"prompt_tokens"`
+	CompletionTokens        int           `json:"completion_tokens"`
+	TotalTokens             int           `json:"total_tokens"`
+	PromptTokensDetails     *TokenDetails `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *TokenDetails `json:"completion_tokens_details,omitempty"`
 }
 
 type ChatStreamChunk struct {
-	ID      string            `json:"id"`
-	Object  string            `json:"object"`
-	Created int64             `json:"created"`
-	Model   string            `json:"model"`
+	ID      string             `json:"id"`
+	Object  string             `json:"object"`
+	Created int64              `json:"created"`
+	Model   string             `json:"model"`
 	Choices []ChatStreamChoice `json:"choices"`
-	Usage   *ChatUsage        `json:"usage,omitempty"`
+	Usage   *ChatUsage         `json:"usage,omitempty"`
 }
 
 type ChatStreamChoice struct {
@@ -241,17 +246,17 @@ type ChatStreamChoice struct {
 }
 
 type ChatStreamDelta struct {
-	Role             string            `json:"role,omitempty"`
-	Content          *string           `json:"content,omitempty"`
-	ReasoningContent *string           `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCallDelta   `json:"tool_calls,omitempty"`
+	Role             string          `json:"role,omitempty"`
+	Content          *string         `json:"content,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 type ToolCallDelta struct {
-	Index    int              `json:"index"`
-	ID       string           `json:"id,omitempty"`
-	Type     string           `json:"type,omitempty"`
-	Function *FunctionDelta   `json:"function,omitempty"`
+	Index    int            `json:"index"`
+	ID       string         `json:"id,omitempty"`
+	Type     string         `json:"type,omitempty"`
+	Function *FunctionDelta `json:"function,omitempty"`
 }
 
 type FunctionDelta struct {
@@ -264,12 +269,12 @@ type FunctionDelta struct {
 // ============================================================================
 
 type TranslateOpts struct {
-	DisableThinking      bool
-	ForceHighEffort      bool
-	EnableWebSearch      bool
-	ForceParallelTools   bool
-	ExtractInlineThink   bool
-	ImageDropDir         string
+	DisableThinking    bool
+	ForceHighEffort    bool
+	EnableWebSearch    bool
+	ForceParallelTools bool
+	ExtractInlineThink bool
+	ImageDropDir       string
 }
 
 // ============================================================================
@@ -277,9 +282,9 @@ type TranslateOpts struct {
 // ============================================================================
 
 type StreamResult struct {
-	Usage          *ResponsesUsage
-	Response       *ResponsesObject
-	ToolCallCount  int
+	Usage         *ResponsesUsage
+	Response      *ResponsesObject
+	ToolCallCount int
 }
 
 type StreamSSEEvent struct {
