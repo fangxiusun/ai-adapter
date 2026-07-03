@@ -12,34 +12,34 @@ import (
 )
 
 type StreamTranslator struct {
-	state          *streamState
-	sink           io.Writer
-	req            *ResponsesRequest
-	opts           TranslateOpts
-	flusher        func()
+	state   *streamState
+	sink    io.Writer
+	req     *ResponsesRequest
+	opts    TranslateOpts
+	flusher func()
 }
 
 type streamState struct {
-	responseID     string
-	createdAt      int64
-	model          string
-	outputIndex    int
-	seqNum         int
-	activeKind     string
-	activeItemID   string
-	activeBuffer   string
-	toolCalls      map[int]*toolCallState
-	finalOutput    []OutputItem
-	finishReason   string
-	usage          *ResponsesUsage
+	responseID   string
+	createdAt    int64
+	model        string
+	outputIndex  int
+	seqNum       int
+	activeKind   string
+	activeItemID string
+	activeBuffer string
+	toolCalls    map[int]*toolCallState
+	finalOutput  []OutputItem
+	finishReason string
+	usage        *ResponsesUsage
 }
 
 type toolCallState struct {
-	itemID       string
-	outputIndex  int
-	callID       string
-	name         string
-	argsBuffer   string
+	itemID      string
+	outputIndex int
+	callID      string
+	name        string
+	argsBuffer  string
 }
 
 func NewStreamTranslator(sink io.Writer, req *ResponsesRequest, opts TranslateOpts, flusher func()) *StreamTranslator {
@@ -79,10 +79,10 @@ func (st *StreamTranslator) ProcessChunk(chunk *ChatStreamChunk) {
 		}
 		st.state.activeBuffer += *delta.ReasoningContent
 		st.emit("response.reasoning_summary_text.delta", map[string]interface{}{
-			"item_id":      st.state.activeItemID,
-			"output_index": st.state.outputIndex - 1,
+			"item_id":       st.state.activeItemID,
+			"output_index":  st.state.outputIndex - 1,
 			"summary_index": 0,
-			"delta":        *delta.ReasoningContent,
+			"delta":         *delta.ReasoningContent,
 		})
 	}
 
@@ -92,10 +92,10 @@ func (st *StreamTranslator) ProcessChunk(chunk *ChatStreamChunk) {
 		}
 		st.state.activeBuffer += *delta.Content
 		st.emit("response.output_text.delta", map[string]interface{}{
-			"item_id":      st.state.activeItemID,
-			"output_index": st.state.outputIndex - 1,
+			"item_id":       st.state.activeItemID,
+			"output_index":  st.state.outputIndex - 1,
 			"content_index": 0,
-			"delta":        *delta.Content,
+			"delta":         *delta.Content,
 		})
 	}
 
@@ -165,18 +165,18 @@ func (st *StreamTranslator) openReasoning() {
 	st.emit("response.output_item.added", map[string]interface{}{
 		"output_index": idx,
 		"item": map[string]interface{}{
-			"id":          st.state.activeItemID,
-			"type":        "reasoning",
-			"summary":     []interface{}{},
+			"id":                st.state.activeItemID,
+			"type":              "reasoning",
+			"summary":           []interface{}{},
 			"encrypted_content": nil,
-			"status":      "in_progress",
+			"status":            "in_progress",
 		},
 	})
 	st.emit("response.reasoning_summary_part.added", map[string]interface{}{
-		"item_id":      st.state.activeItemID,
-		"output_index": idx,
+		"item_id":       st.state.activeItemID,
+		"output_index":  idx,
 		"summary_index": 0,
-		"part":         map[string]interface{}{"type": "summary_text", "text": ""},
+		"part":          map[string]interface{}{"type": "summary_text", "text": ""},
 	})
 }
 
@@ -191,18 +191,18 @@ func (st *StreamTranslator) openMessage() {
 	st.emit("response.output_item.added", map[string]interface{}{
 		"output_index": idx,
 		"item": map[string]interface{}{
-			"id":       st.state.activeItemID,
-			"type":     "message",
-			"role":     "assistant",
-			"status":   "in_progress",
-			"content":  []interface{}{},
+			"id":      st.state.activeItemID,
+			"type":    "message",
+			"role":    "assistant",
+			"status":  "in_progress",
+			"content": []interface{}{},
 		},
 	})
 	st.emit("response.content_part.added", map[string]interface{}{
-		"item_id":      st.state.activeItemID,
-		"output_index": idx,
+		"item_id":       st.state.activeItemID,
+		"output_index":  idx,
 		"content_index": 0,
-		"part":         map[string]interface{}{"type": "output_text", "text": "", "annotations": []interface{}{}},
+		"part":          map[string]interface{}{"type": "output_text", "text": "", "annotations": []interface{}{}},
 	})
 }
 
@@ -226,12 +226,12 @@ func (st *StreamTranslator) openToolCall(index int, id, name string) *toolCallSt
 	st.emit("response.output_item.added", map[string]interface{}{
 		"output_index": outputIndex,
 		"item": map[string]interface{}{
-			"id":          itemID,
-			"type":        "function_call",
-			"call_id":     callID,
-			"name":        name,
-			"arguments":   "",
-			"status":      "in_progress",
+			"id":        itemID,
+			"type":      "function_call",
+			"call_id":   callID,
+			"name":      name,
+			"arguments": "",
+			"status":    "in_progress",
 		},
 	})
 	return tc
@@ -247,16 +247,16 @@ func (st *StreamTranslator) finalizeActive() {
 
 	if st.state.activeKind == "reasoning" {
 		st.emit("response.reasoning_summary_text.done", map[string]interface{}{
-			"item_id":      itemID,
-			"output_index": outputIndex,
+			"item_id":       itemID,
+			"output_index":  outputIndex,
 			"summary_index": 0,
-			"text":         buffer,
+			"text":          buffer,
 		})
 		st.emit("response.reasoning_summary_part.done", map[string]interface{}{
-			"item_id":      itemID,
-			"output_index": outputIndex,
+			"item_id":       itemID,
+			"output_index":  outputIndex,
 			"summary_index": 0,
-			"part":         map[string]interface{}{"type": "summary_text", "text": buffer},
+			"part":          map[string]interface{}{"type": "summary_text", "text": buffer},
 		})
 		finalItem := OutputItem{
 			ID:               itemID,
@@ -272,16 +272,16 @@ func (st *StreamTranslator) finalizeActive() {
 		})
 	} else if st.state.activeKind == "message" {
 		st.emit("response.output_text.done", map[string]interface{}{
-			"item_id":      itemID,
-			"output_index": outputIndex,
+			"item_id":       itemID,
+			"output_index":  outputIndex,
 			"content_index": 0,
-			"text":         buffer,
+			"text":          buffer,
 		})
 		st.emit("response.content_part.done", map[string]interface{}{
-			"item_id":      itemID,
-			"output_index": outputIndex,
+			"item_id":       itemID,
+			"output_index":  outputIndex,
 			"content_index": 0,
-			"part":         map[string]interface{}{"type": "output_text", "text": buffer, "annotations": []interface{}{}},
+			"part":          map[string]interface{}{"type": "output_text", "text": buffer, "annotations": []interface{}{}},
 		})
 		finalItem := OutputItem{
 			ID:     itemID,
@@ -391,44 +391,38 @@ func (st *StreamTranslator) emit(event string, data map[string]interface{}) {
 }
 
 func PipeChatStreamToResponses(ctx context.Context, upstream io.Reader, sink io.Writer, req *ResponsesRequest, opts TranslateOpts) (*StreamResult, error) {
- translator := NewStreamTranslator(sink, req, opts, nil)
- translator.Start()
+	translator := NewStreamTranslator(sink, req, opts, nil)
+	translator.Start()
 
- scanner := bufio.NewScanner(upstream)
- scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner := bufio.NewScanner(upstream)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
- for scanner.Scan() {
- line := scanner.Text()
- if !strings.HasPrefix(line, "data: ") {
- continue
- }
- data := strings.TrimPrefix(line, "data: ")
- if data == "[DONE]" {
- break
- }
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
 
- var chunk ChatStreamChunk
- if err := json.Unmarshal([]byte(data), &chunk); err != nil {
- continue
- }
- translator.ProcessChunk(&chunk)
- }
+		var chunk ChatStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		translator.ProcessChunk(&chunk)
+	}
 
- result := translator.Finish()
- return result, nil
+	result := translator.Finish()
+	return result, nil
 }
 
 func PipeResponsesStreamToChat(ctx context.Context, upstream io.Reader, sink io.Writer, req *ChatRequest, opts TranslateOpts) (*ChatResponse, error) {
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	var content string
-	var reasoningContent string
-	var toolCalls []ChatToolCall
-	var usage *ChatUsage
-	var finishReason string
-
-	seenEvents := make(map[string]bool)
+	state := newResponsesStreamToChatState(req.Model)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -448,98 +442,357 @@ func PipeResponsesStreamToChat(ctx context.Context, upstream io.Reader, sink io.
 			slog.Warn("sse_parse_failed", "error", err, "data", truncateString(data, 200))
 			continue
 		}
+		state.process(raw)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 
-		eventType, _ := raw["type"].(string)
-		seenEvents[eventType] = true
+	return state.build(), nil
+}
 
-		switch eventType {
-		case "response.output_text.delta":
-			if delta, ok := raw["delta"].(string); ok {
-				content += delta
-			}
-		case "response.reasoning_summary_text.delta":
-			if delta, ok := raw["delta"].(string); ok {
-				reasoningContent += delta
-			}
-		case "response.function_call_arguments.delta":
-			itemID, _ := raw["item_id"].(string)
-			delta, _ := raw["delta"].(string)
-			found := false
-			for i := range toolCalls {
-				if toolCalls[i].ID == itemID {
-					toolCalls[i].Function.Arguments += delta
-					found = true
-					break
-				}
-			}
-			if !found {
-				toolCalls = append(toolCalls, ChatToolCall{
-					ID:   itemID,
-					Type: "function",
-					Function: FunctionCall{
-						Arguments: delta,
-					},
-				})
-			}
-		case "response.function_call_arguments.done":
-			itemID, _ := raw["item_id"].(string)
-			args, _ := raw["arguments"].(string)
-			for i := range toolCalls {
-				if toolCalls[i].ID == itemID {
-					toolCalls[i].Function.Arguments = SalvageToolCallArguments(args)
-					break
-				}
-			}
-		case "response.function_call":
-			itemID, _ := raw["item_id"].(string)
-			callID, _ := raw["call_id"].(string)
-			name, _ := raw["name"].(string)
-			toolCalls = append(toolCalls, ChatToolCall{
-				ID:   callID,
-				Type: "function",
-				Function: FunctionCall{
-					Name: name,
-				},
-			})
-			_ = itemID
+type responsesStreamToChatState struct {
+	id               string
+	created          int64
+	model            string
+	content          string
+	reasoningContent string
+	usage            *ChatUsage
+	finishReason     string
+	items            map[string]*responsesStreamItem
+	orderedIDs       []string
+}
+
+type responsesStreamItem struct {
+	id        string
+	itemType  string
+	callID    string
+	name      string
+	arguments string
+	content   string
+	reasoning string
+}
+
+func newResponsesStreamToChatState(model string) *responsesStreamToChatState {
+	return &responsesStreamToChatState{
+		model:      model,
+		items:      make(map[string]*responsesStreamItem),
+		orderedIDs: make([]string, 0),
+	}
+}
+
+func (st *responsesStreamToChatState) process(raw map[string]interface{}) {
+	eventType, _ := raw["type"].(string)
+	switch eventType {
+	case "response.output_item.added":
+		st.upsertItem(raw["item"])
+	case "response.output_item.done":
+		st.upsertItem(raw["item"])
+	case "response.output_text.delta":
+		item := st.itemForEvent(raw)
+		delta, _ := raw["delta"].(string)
+		if item != nil {
+			item.content += delta
+		}
+		st.content += delta
+	case "response.output_text.done":
+		item := st.itemForEvent(raw)
+		text, _ := raw["text"].(string)
+		if item != nil && text != "" {
+			item.content = text
+			st.content = st.collectMessageContent()
+		}
+	case "response.reasoning_summary_text.delta":
+		item := st.itemForEvent(raw)
+		delta, _ := raw["delta"].(string)
+		if item != nil {
+			item.reasoning += delta
+		}
+		st.reasoningContent += delta
+	case "response.reasoning_summary_text.done":
+		item := st.itemForEvent(raw)
+		text, _ := raw["text"].(string)
+		if item != nil && text != "" {
+			item.reasoning = text
+			st.reasoningContent = st.collectReasoningContent()
+		}
+	case "response.function_call_arguments.delta":
+		item := st.itemForEvent(raw)
+		delta, _ := raw["delta"].(string)
+		if item != nil {
+			item.itemType = "function_call"
+			item.arguments += delta
+		}
+	case "response.function_call_arguments.done":
+		item := st.itemForEvent(raw)
+		args, _ := raw["arguments"].(string)
+		if item != nil {
+			item.itemType = "function_call"
+			item.arguments = SalvageToolCallArguments(args)
+		}
+	case "response.function_call":
+		item := st.itemForEvent(raw)
+		if item != nil {
+			item.itemType = "function_call"
+			item.callID, _ = raw["call_id"].(string)
+			item.name, _ = raw["name"].(string)
+		}
+	case "response.completed":
+		st.applyCompleted(raw["response"])
+	}
+}
+
+func (st *responsesStreamToChatState) itemForEvent(raw map[string]interface{}) *responsesStreamItem {
+	itemID, _ := raw["item_id"].(string)
+	if itemID == "" {
+		return nil
+	}
+	item, ok := st.items[itemID]
+	if !ok {
+		item = &responsesStreamItem{id: itemID}
+		st.items[itemID] = item
+		st.orderedIDs = append(st.orderedIDs, itemID)
+	}
+	return item
+}
+
+func (st *responsesStreamToChatState) upsertItem(raw interface{}) *responsesStreamItem {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	itemID, _ := m["id"].(string)
+	if itemID == "" {
+		return nil
+	}
+	item, ok := st.items[itemID]
+	if !ok {
+		item = &responsesStreamItem{id: itemID}
+		st.items[itemID] = item
+		st.orderedIDs = append(st.orderedIDs, itemID)
+	}
+	item.applyMap(m)
+	st.refreshFromItems()
+	return item
+}
+
+func (item *responsesStreamItem) applyMap(m map[string]interface{}) {
+	if t, ok := m["type"].(string); ok && t != "" {
+		item.itemType = t
+	}
+	if callID, ok := m["call_id"].(string); ok && callID != "" {
+		item.callID = callID
+	}
+	if name, ok := m["name"].(string); ok && name != "" {
+		item.name = name
+	}
+	if args, ok := m["arguments"].(string); ok && args != "" {
+		item.arguments = SalvageToolCallArguments(args)
+	}
+	if content, ok := m["content"].([]interface{}); ok {
+		item.content = responsesContentPartsText(content)
+	}
+	if encrypted, ok := m["encrypted_content"].(string); ok && encrypted != "" {
+		item.reasoning = encrypted
+	} else if summary, ok := m["summary"].([]interface{}); ok {
+		item.reasoning = responsesSummaryText(summary)
+	}
+}
+
+func (st *responsesStreamToChatState) applyCompleted(raw interface{}) {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if id, ok := m["id"].(string); ok && id != "" {
+		st.id = id
+	}
+	if created, ok := numberToInt64(m["created_at"]); ok {
+		st.created = created
+	}
+	if model, ok := m["model"].(string); ok && model != "" {
+		st.model = model
+	}
+	if usage, ok := responsesUsageFromRaw(m["usage"]); ok {
+		st.usage = usage
+	}
+	if incomplete, ok := m["incomplete_details"].(map[string]interface{}); ok {
+		if reason, _ := incomplete["reason"].(string); reason == "max_output_tokens" {
+			st.finishReason = "length"
 		}
 	}
-
-	msg := ChatChoiceMsg{Role: "assistant"}
-	if reasoningContent != "" {
-		msg.ReasoningContent = &reasoningContent
+	if output, ok := m["output"].([]interface{}); ok && len(output) > 0 {
+		for _, rawItem := range output {
+			st.upsertItem(rawItem)
+		}
+		st.refreshFromItems()
 	}
-	if content != "" {
-		msg.Content = &content
-	} else if len(toolCalls) == 0 {
+}
+
+func (st *responsesStreamToChatState) refreshFromItems() {
+	if content := st.collectMessageContent(); content != "" {
+		st.content = content
+	}
+	if reasoning := st.collectReasoningContent(); reasoning != "" {
+		st.reasoningContent = reasoning
+	}
+}
+
+func (st *responsesStreamToChatState) collectMessageContent() string {
+	var parts []string
+	for _, id := range st.orderedIDs {
+		item := st.items[id]
+		if item != nil && item.itemType == "message" && item.content != "" {
+			parts = append(parts, item.content)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func (st *responsesStreamToChatState) collectReasoningContent() string {
+	var parts []string
+	for _, id := range st.orderedIDs {
+		item := st.items[id]
+		if item != nil && item.itemType == "reasoning" && item.reasoning != "" {
+			parts = append(parts, item.reasoning)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func (st *responsesStreamToChatState) build() *ChatResponse {
+	msg := ChatChoiceMsg{Role: "assistant"}
+	if st.reasoningContent != "" {
+		msg.ReasoningContent = &st.reasoningContent
+	}
+	if st.content != "" {
+		msg.Content = &st.content
+	}
+
+	for _, id := range st.orderedIDs {
+		item := st.items[id]
+		if item == nil || item.itemType != "function_call" {
+			continue
+		}
+		callID := item.callID
+		if callID == "" {
+			callID = item.id
+		}
+		msg.ToolCalls = append(msg.ToolCalls, ChatToolCall{
+			ID:   callID,
+			Type: "function",
+			Function: FunctionCall{
+				Name:      item.name,
+				Arguments: SalvageToolCallArguments(item.arguments),
+			},
+		})
+	}
+
+	if msg.Content == nil && len(msg.ToolCalls) == 0 {
 		s := ""
 		msg.Content = &s
 	}
-	if len(toolCalls) > 0 {
-		msg.ToolCalls = toolCalls
-	}
 
-	finish := "stop"
-	if finishReason == "length" {
-		finish = "length"
+	finish := st.finishReason
+	if finish == "" {
+		finish = "stop"
+	}
+	id := st.id
+	if id == "" {
+		id = generateResponseID()
+	}
+	created := st.created
+	if created == 0 {
+		created = time.Now().Unix()
 	}
 
 	return &ChatResponse{
-		ID:      generateResponseID(),
+		ID:      id,
 		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   req.Model,
-		Choices: []ChatChoice{
-			{
-				Index:        0,
-				Message:      msg,
-				FinishReason: finish,
-			},
-		},
-		Usage: usage,
-	}, nil
+		Created: created,
+		Model:   st.model,
+		Choices: []ChatChoice{{
+			Index:        0,
+			Message:      msg,
+			FinishReason: finish,
+		}},
+		Usage: st.usage,
+	}
 }
 
+func responsesContentPartsText(raw []interface{}) string {
+	var parts []string
+	for _, p := range raw {
+		m, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t != "output_text" {
+			continue
+		}
+		if text, ok := m["text"].(string); ok {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func responsesSummaryText(raw []interface{}) string {
+	var parts []string
+	for _, p := range raw {
+		m, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if text, ok := m["text"].(string); ok {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func responsesUsageFromRaw(raw interface{}) (*ChatUsage, bool) {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	input, _ := numberToInt(m["input_tokens"])
+	output, _ := numberToInt(m["output_tokens"])
+	total, _ := numberToInt(m["total_tokens"])
+	return &ChatUsage{PromptTokens: input, CompletionTokens: output, TotalTokens: total}, true
+}
+
+func numberToInt(raw interface{}) (int, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return int(n), err == nil
+	default:
+		return 0, false
+	}
+}
+
+func numberToInt64(raw interface{}) (int64, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return int64(v), true
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
 
 // truncateString truncates a string to maxLength and adds "..." if truncated.
 func truncateString(s string, maxLength int) string {
