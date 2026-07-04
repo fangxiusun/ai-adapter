@@ -11,9 +11,9 @@ import (
 
 // Engine processes HTTP headers according to configured policies.
 type Engine struct {
-	globalReq  *config.HeaderPolicyConfig
-	globalRes  *config.HeaderPolicyConfig
-	channels   map[string]*channelPolicy
+	globalReq *config.HeaderPolicyConfig
+	globalRes *config.HeaderPolicyConfig
+	channels  map[string]*channelPolicy
 }
 
 // channelPolicy holds resolved policies for a channel and its models.
@@ -265,13 +265,13 @@ func applyRules(headers http.Header, rules []collectedRule, defaultAction config
 		}
 	}
 
-	// Second pass: for set actions, add new headers if they don't exist
+	// Second pass: for set actions, add new headers if they don't exist.
 	for _, rule := range rules {
 		if rule.Action == config.ActionSet {
 			targetKey := rule.Pattern
 			lowerTarget := strings.ToLower(targetKey)
-			if !processed[lowerTarget] && headers.Get(targetKey) == "" {
-				headers.Set(targetKey, rule.Value)
+			if !processed[lowerTarget] && !hasHeader(headers, targetKey) {
+				headers[targetKey] = []string{rule.Value}
 				processed[lowerTarget] = true
 			}
 		}
@@ -293,31 +293,87 @@ func applySingleRule(headers http.Header, key string, rule config.HeaderRule) {
 	case config.ActionDrop:
 		delete(headers, key)
 	case config.ActionPass:
-		// do nothing
+		rewritePassHeaderKey(headers, key, rule)
 	case config.ActionSet:
-		headers.Set(key, rule.Value)
+		headers[key] = []string{rule.Value}
 	case config.ActionRename:
-		value := headers.Get(key)
+		values := cloneHeaderValues(headers[key])
 		delete(headers, key)
-		headers.Set(rule.Target, value)
+		headers[rule.Target] = values
 	case config.ActionAppend:
-		existing := headers.Get(key)
-		if existing != "" {
-			headers.Set(key, existing+", "+rule.Value)
+		values := cloneHeaderValues(headers[key])
+		if len(values) > 0 {
+			values[0] = values[0] + ", " + rule.Value
 		} else {
-			headers.Set(key, rule.Value)
+			values = []string{rule.Value}
 		}
+		headers[key] = values
 	case config.ActionPrepend:
-		existing := headers.Get(key)
-		if existing != "" {
-			headers.Set(key, rule.Value+", "+existing)
+		values := cloneHeaderValues(headers[key])
+		if len(values) > 0 {
+			values[0] = rule.Value + ", " + values[0]
 		} else {
-			headers.Set(key, rule.Value)
+			values = []string{rule.Value}
 		}
+		headers[key] = values
 	case config.ActionCopy:
-		value := headers.Get(key)
-		headers.Set(rule.Target, value)
+		headers[rule.Target] = cloneHeaderValues(headers[key])
 	}
+}
+
+func rewritePassHeaderKey(headers http.Header, key string, rule config.HeaderRule) {
+	newKey := key
+	switch normalizeKeyCasePolicy(rule.KeyCasePolicy) {
+	case config.KeyCasePreserveMapKey:
+		return
+	case config.KeyCaseCanonical:
+		newKey = http.CanonicalHeaderKey(key)
+	case config.KeyCaseLower:
+		newKey = strings.ToLower(key)
+	case config.KeyCaseConfigured:
+		if rule.MatchType != config.MatchExact {
+			return
+		}
+		newKey = rule.Pattern
+	}
+	rewriteHeaderKey(headers, key, newKey)
+}
+
+func normalizeKeyCasePolicy(policy config.HeaderKeyCasePolicy) config.HeaderKeyCasePolicy {
+	if policy == "" {
+		return config.KeyCasePreserveMapKey
+	}
+	return policy
+}
+
+func rewriteHeaderKey(headers http.Header, oldKey, newKey string) {
+	if oldKey == newKey || newKey == "" {
+		return
+	}
+	values, ok := headers[oldKey]
+	if !ok {
+		return
+	}
+	delete(headers, oldKey)
+	headers[newKey] = cloneHeaderValues(values)
+}
+
+func hasHeader(headers http.Header, key string) bool {
+	for existing := range headers {
+		if strings.EqualFold(existing, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneHeaderValues(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
 }
 
 // ==================== Helpers ====================

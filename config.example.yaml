@@ -37,6 +37,7 @@ database:
 #   request:
 #     enabled: true
 #     default_action: pass
+#     key_case_policy: preserve_map_key  # preserve_map_key|canonical|lower|configured
 #     drop: ["X-Debug-*", "~^x-internal-.*$"]  # wildcard and regex
 #     set:
 #       "X-Gateway-ID": "ai-adapter"

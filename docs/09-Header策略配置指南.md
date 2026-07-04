@@ -57,6 +57,7 @@ headers:
   request:
     enabled: true                    # 是否启用（默认 true）
     default_action: pass             # 未匹配规则的默认行为：pass|drop
+    key_case_policy: preserve_map_key # header key 输出大小写策略
     drop:                            # 要删除的 header 列表
       - "X-Debug-*"
       - "X-Remove-Me"
@@ -89,6 +90,7 @@ headers:
   request:
     enabled: true
     default_action: pass
+    key_case_policy: configured
     rules:
       - name: "rule-name"            # 规则名称（用于日志）
         phase: request               # 作用阶段：request|response|both
@@ -309,7 +311,35 @@ rules:
 
 ---
 
+
+## Header key 大小写策略
+
+`key_case_policy` 控制命中 `pass` 规则时输出 header key 的大小写。该配置属于 policy 级别，可配置在 `headers.request`、`headers.response`、渠道级 `request_headers` / `response_headers` 和模型级 header policy 中。
+
+| 值 | 行为 |
+|----|------|
+| `preserve_map_key` | 保留当前 `http.Header` map 中的 key，默认值 |
+| `canonical` | 输出 Go canonical form，例如 `X-Custom-Auth` |
+| `lower` | 输出小写，例如 `x-custom-auth` |
+| `configured` | 精确匹配的 `pass` 规则使用配置中 `pattern` 或简化 `pass` 项的大小写 |
+
+示例：
+
+```yaml
+headers:
+  request:
+    enabled: true
+    default_action: pass
+    key_case_policy: configured
+    pass:
+      - "x-custom-auth"
+```
+
+当客户端请求进入策略引擎时的 key 为 `X-Custom-Auth`，命中上面的 `pass` 规则后，输出 map key 会被改写为 `x-custom-auth`。通配符和正则 `pass` 没有唯一的配置 key，使用 `configured` 时会保留当前 map key。
+
+> **注意**：该能力不表示保留客户端或上游在线路上的原始大小写。Go `net/http` 在解析请求和响应时通常已经做过规范化。HTTP/2 要求 header name 为小写，不能保留任意大小写。
 ## 默认行为
+
 
 `default_action` 定义了未匹配任何规则的 header 的处理方式：
 
@@ -615,6 +645,7 @@ rules:
 | `invalid regex pattern` | 正则表达式语法错误 |
 | `value is required for action set` | set 操作缺少 value |
 | `target is required for action rename` | rename 操作缺少 target |
+| `key_case_policy must be preserve_map_key/canonical/lower/configured` | key_case_policy 值无效 |
 
 ---
 

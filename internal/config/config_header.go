@@ -39,32 +39,44 @@ const (
 	MatchRegex    HeaderMatchType = "regex"
 )
 
+// HeaderKeyCasePolicy controls how matched pass-through header keys are emitted.
+type HeaderKeyCasePolicy string
+
+const (
+	KeyCasePreserveMapKey HeaderKeyCasePolicy = "preserve_map_key"
+	KeyCaseCanonical      HeaderKeyCasePolicy = "canonical"
+	KeyCaseLower          HeaderKeyCasePolicy = "lower"
+	KeyCaseConfigured     HeaderKeyCasePolicy = "configured"
+)
+
 // HeaderRule defines a single header policy rule.
 type HeaderRule struct {
-	Name      string          `yaml:"name"`
-	Phase     HeaderPhase     `yaml:"phase"`
-	MatchType HeaderMatchType `yaml:"match_type"`
-	Pattern   string          `yaml:"pattern"`
-	Action    HeaderAction    `yaml:"action"`
-	Value     string          `yaml:"value,omitempty"`
-	Target    string          `yaml:"target,omitempty"`
+	Name          string              `yaml:"name"`
+	Phase         HeaderPhase         `yaml:"phase"`
+	MatchType     HeaderMatchType     `yaml:"match_type"`
+	Pattern       string              `yaml:"pattern"`
+	Action        HeaderAction        `yaml:"action"`
+	Value         string              `yaml:"value,omitempty"`
+	Target        string              `yaml:"target,omitempty"`
+	KeyCasePolicy HeaderKeyCasePolicy `yaml:"-"`
 }
 
 // HeaderPolicyConfig defines a set of header rules with a default action.
 // Supports both simplified and full syntax.
 type HeaderPolicyConfig struct {
-	Enabled       bool            `yaml:"enabled"`
-	DefaultAction HeaderAction    `yaml:"default_action"`
-	Rules         []HeaderRule    `yaml:"rules"`
+	Enabled       bool                `yaml:"enabled"`
+	DefaultAction HeaderAction        `yaml:"default_action"`
+	KeyCasePolicy HeaderKeyCasePolicy `yaml:"key_case_policy,omitempty"`
+	Rules         []HeaderRule        `yaml:"rules"`
 
 	// Simplified syntax - maps action to patterns
-	Drop    []string            `yaml:"drop,omitempty"`
-	Pass    []string            `yaml:"pass,omitempty"`
-	Set     map[string]string   `yaml:"set,omitempty"`
-	Rename  map[string]string   `yaml:"rename,omitempty"`
-	Append  map[string]string   `yaml:"append,omitempty"`
-	Prepend map[string]string   `yaml:"prepend,omitempty"`
-	Copy    map[string]string   `yaml:"copy,omitempty"`
+	Drop    []string          `yaml:"drop,omitempty"`
+	Pass    []string          `yaml:"pass,omitempty"`
+	Set     map[string]string `yaml:"set,omitempty"`
+	Rename  map[string]string `yaml:"rename,omitempty"`
+	Append  map[string]string `yaml:"append,omitempty"`
+	Prepend map[string]string `yaml:"prepend,omitempty"`
+	Copy    map[string]string `yaml:"copy,omitempty"`
 }
 
 // HeadersConfig is a simplified top-level header configuration.
@@ -183,6 +195,12 @@ func (p *HeaderPolicyConfig) ToRules(phase HeaderPhase) []HeaderRule {
 	// Append explicit rules
 	rules = append(rules, p.Rules...)
 
+	for i := range rules {
+		if rules[i].KeyCasePolicy == "" {
+			rules[i].KeyCasePolicy = p.KeyCasePolicy
+		}
+	}
+
 	return rules
 }
 
@@ -201,6 +219,16 @@ func validateHeaderPolicy(p *HeaderPolicyConfig, context string) error {
 			// valid
 		default:
 			return fmt.Errorf("%s: default_action must be 'pass' or 'drop', got: %s", context, p.DefaultAction)
+		}
+	}
+
+	// Validate key_case_policy
+	if p.KeyCasePolicy != "" {
+		switch p.KeyCasePolicy {
+		case KeyCasePreserveMapKey, KeyCaseCanonical, KeyCaseLower, KeyCaseConfigured:
+			// valid
+		default:
+			return fmt.Errorf("%s: key_case_policy must be preserve_map_key/canonical/lower/configured, got: %s", context, p.KeyCasePolicy)
 		}
 	}
 

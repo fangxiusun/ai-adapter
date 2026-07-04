@@ -98,9 +98,9 @@ func TestMatch(t *testing.T) {
 
 func TestDetectMatchType(t *testing.T) {
 	tests := []struct {
-		pattern      string
-		wantType     config.HeaderMatchType
-		wantClean    string
+		pattern   string
+		wantType  config.HeaderMatchType
+		wantClean string
 	}{
 		{"~^x-.*$", config.MatchRegex, "^x-.*$"},
 		{"X-Internal-*", config.MatchWildcard, "X-Internal-*"},
@@ -202,8 +202,8 @@ func TestEngine_SimplifiedFormat_Basic(t *testing.T) {
 	if result.Get("X-Debug-Trace") != "" {
 		t.Error("X-Debug-Trace should be dropped")
 	}
-	if result.Get("X-Gateway-ID") != "ai-adapter" {
-		t.Errorf("X-Gateway-ID should be 'ai-adapter', got %q", result.Get("X-Gateway-ID"))
+	if got := result["X-Gateway-ID"]; len(got) != 1 || got[0] != "ai-adapter" {
+		t.Errorf("X-Gateway-ID should be 'ai-adapter', got %#v", result)
 	}
 	if result.Get("X-Custom") != "value" {
 		t.Error("X-Custom should pass through")
@@ -294,6 +294,132 @@ func TestEngine_SimplifiedFormat_AllActions(t *testing.T) {
 	}
 }
 
+func TestEngine_KeyCasePolicy_PreserveMapKeyByDefault(t *testing.T) {
+	cfg := &config.Config{
+		Headers: &config.HeadersConfig{
+			Request: &config.HeaderPolicyConfig{
+				Enabled: true,
+				Pass:    []string{"X-Custom-Auth"},
+			},
+		},
+	}
+	engine := NewEngine(cfg)
+
+	clientHeaders := http.Header{
+		"x-custom-auth": []string{"token"},
+	}
+
+	result := engine.ProcessRequest("ch1", "model1", clientHeaders)
+
+	if got := result["x-custom-auth"]; len(got) != 1 || got[0] != "token" {
+		t.Fatalf("expected pass to preserve map key x-custom-auth, got %#v", result)
+	}
+	if _, ok := result["X-Custom-Auth"]; ok {
+		t.Fatalf("did not expect canonical key X-Custom-Auth, got %#v", result)
+	}
+}
+
+func TestEngine_KeyCasePolicy_ConfiguredUsesPassPatternCase(t *testing.T) {
+	cfg := &config.Config{
+		Headers: &config.HeadersConfig{
+			Request: &config.HeaderPolicyConfig{
+				Enabled:       true,
+				KeyCasePolicy: config.KeyCaseConfigured,
+				Pass:          []string{"x-custom-auth"},
+			},
+		},
+	}
+	engine := NewEngine(cfg)
+
+	clientHeaders := http.Header{
+		"X-Custom-Auth": []string{"token"},
+	}
+
+	result := engine.ProcessRequest("ch1", "model1", clientHeaders)
+
+	if got := result["x-custom-auth"]; len(got) != 1 || got[0] != "token" {
+		t.Fatalf("expected configured pass to rewrite key to x-custom-auth, got %#v", result)
+	}
+	if _, ok := result["X-Custom-Auth"]; ok {
+		t.Fatalf("did not expect original key X-Custom-Auth, got %#v", result)
+	}
+}
+
+func TestEngine_KeyCasePolicy_LowerAndCanonical(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy config.HeaderKeyCasePolicy
+		want   string
+	}{
+		{name: "lower", policy: config.KeyCaseLower, want: "x-custom-auth"},
+		{name: "canonical", policy: config.KeyCaseCanonical, want: "X-Custom-Auth"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Headers: &config.HeadersConfig{
+					Request: &config.HeaderPolicyConfig{
+						Enabled:       true,
+						KeyCasePolicy: tt.policy,
+						Pass:          []string{"X-Custom-Auth"},
+					},
+				},
+			}
+			engine := NewEngine(cfg)
+
+			clientHeaders := http.Header{
+				"X-CUSTOM-AUTH": []string{"token"},
+			}
+
+			result := engine.ProcessRequest("ch1", "model1", clientHeaders)
+
+			if got := result[tt.want]; len(got) != 1 || got[0] != "token" {
+				t.Fatalf("expected key %s with token value, got %#v", tt.want, result)
+			}
+			if _, ok := result["X-CUSTOM-AUTH"]; ok && tt.want != "X-CUSTOM-AUTH" {
+				t.Fatalf("did not expect original key X-CUSTOM-AUTH, got %#v", result)
+			}
+		})
+	}
+}
+
+func TestEngine_SetRenameCopyUseConfiguredTargetCase(t *testing.T) {
+	cfg := &config.Config{
+		Headers: &config.HeadersConfig{
+			Request: &config.HeaderPolicyConfig{
+				Enabled: true,
+				Set: map[string]string{
+					"x-set-me": "set",
+				},
+				Rename: map[string]string{
+					"X-Rename-Me": "x-renamed",
+				},
+				Copy: map[string]string{
+					"X-Copy-Me": "x-copied",
+				},
+			},
+		},
+	}
+	engine := NewEngine(cfg)
+
+	clientHeaders := http.Header{
+		"X-Rename-Me": []string{"rename"},
+		"X-Copy-Me":   []string{"copy"},
+	}
+
+	result := engine.ProcessRequest("ch1", "model1", clientHeaders)
+
+	if got := result["x-set-me"]; len(got) != 1 || got[0] != "set" {
+		t.Fatalf("expected set to keep configured key case, got %#v", result)
+	}
+	if got := result["x-renamed"]; len(got) != 1 || got[0] != "rename" {
+		t.Fatalf("expected rename target to keep configured key case, got %#v", result)
+	}
+	if got := result["x-copied"]; len(got) != 1 || got[0] != "copy" {
+		t.Fatalf("expected copy target to keep configured key case, got %#v", result)
+	}
+}
 func TestEngine_SimplifiedFormat_ResponseHeaders(t *testing.T) {
 	cfg := &config.Config{
 		Headers: &config.HeadersConfig{
@@ -383,8 +509,8 @@ func TestEngine_ProcessRequest_GlobalRules(t *testing.T) {
 
 	result := engine.ProcessRequest("ch1", "model1", clientHeaders)
 
-	if result.Get("X-Gateway-Id") != "ai-adapter" {
-		t.Errorf("X-Gateway-Id should be 'ai-adapter', got %q", result.Get("X-Gateway-Id"))
+	if got := result["x-gateway-id"]; len(got) != 1 || got[0] != "ai-adapter" {
+		t.Errorf("x-gateway-id should be 'ai-adapter', got %#v", result)
 	}
 	if result.Get("X-Custom") != "value" {
 		t.Error("X-Custom should pass through")
