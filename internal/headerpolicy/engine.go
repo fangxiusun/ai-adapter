@@ -3,6 +3,7 @@ package headerpolicy
 import (
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/fangxiusun/ai-adapter/internal/config"
 )
@@ -11,9 +12,17 @@ import (
 
 // Engine processes HTTP headers according to configured policies.
 type Engine struct {
+	mu        sync.RWMutex
 	globalReq *config.HeaderPolicyConfig
 	globalRes *config.HeaderPolicyConfig
 	channels  map[string]*channelPolicy
+}
+
+func (e *Engine) Reload(cfg *config.Config) {
+	next := NewEngine(cfg)
+	e.mu.Lock()
+	e.globalReq, e.globalRes, e.channels = next.globalReq, next.globalRes, next.channels
+	e.mu.Unlock()
 }
 
 // channelPolicy holds resolved policies for a channel and its models.
@@ -67,6 +76,8 @@ func NewEngine(cfg *config.Config) *Engine {
 
 // ProcessRequest processes client->upstream request headers.
 func (e *Engine) ProcessRequest(channelID, model string, clientHeaders http.Header) http.Header {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	result := cloneHeaders(clientHeaders)
 	applySafetyRules(result, "request")
 	rules := e.collectRequestRules(channelID, model)
@@ -77,6 +88,8 @@ func (e *Engine) ProcessRequest(channelID, model string, clientHeaders http.Head
 
 // ProcessResponse processes upstream->client response headers.
 func (e *Engine) ProcessResponse(channelID, model string, upstreamHeaders http.Header) http.Header {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	result := cloneHeaders(upstreamHeaders)
 	applySafetyRules(result, "response")
 	rules := e.collectResponseRules(channelID, model)

@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -112,6 +112,16 @@ func main() {
 	headerEngine := headerpolicy.NewEngine(cfg)
 	proxyHandler := proxy.NewProxyHandler(channels, database, logger, cfg, deepDebugLogger, headerEngine, statsInstance, wsHub)
 	webHandler := web.NewWebHandler(channels, database, cfg, statsInstance, wsHub, version)
+	webHandler.EnableConfigEditing(*configPath, func(next *config.Config) error {
+		channels.Reload(next.Channels, next.Proxies, next.Failover.LoadBalance)
+		headerEngine.Reload(next)
+		logger.SetLevel(next.Logging.Level)
+		logger.SetLogIO(next.Logging.LogIO)
+		logger.SetLogRequestBody(next.Logging.LogRequestBody)
+		*cfg = *next
+		logger.LogConfigReload(*configPath)
+		return nil
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", proxyHandler.HandleChat)
@@ -125,9 +135,9 @@ func main() {
 
 	middleware := chainMiddleware(mux,
 		loggingMiddleware(logger),
-		corsMiddleware(cfg.Server.AdminAllowedOrigins),
-		authMiddleware(cfg.Server.APIToken),
-		adminAuthMiddleware(cfg.Server.AdminToken),
+		corsMiddlewareConfig(cfg),
+		authMiddlewareConfig(cfg),
+		adminAuthMiddlewareConfig(cfg),
 	)
 
 	server := &http.Server{
@@ -174,6 +184,30 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	server.Shutdown(ctx)
+}
+
+func corsMiddlewareConfig(cfg *config.Config) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			corsMiddleware(cfg.Server.AdminAllowedOrigins)(next).ServeHTTP(w, r)
+		})
+	}
+}
+
+func authMiddlewareConfig(cfg *config.Config) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authMiddleware(cfg.Server.APIToken)(next).ServeHTTP(w, r)
+		})
+	}
+}
+
+func adminAuthMiddlewareConfig(cfg *config.Config) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			adminAuthMiddleware(cfg.Server.AdminToken)(next).ServeHTTP(w, r)
+		})
+	}
 }
 
 func loggingMiddleware(logger *applog.Logger) func(http.Handler) http.Handler {

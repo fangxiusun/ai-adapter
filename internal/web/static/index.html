@@ -365,32 +365,17 @@
         <div x-show="page === 'settings'" x-cloak>
             <div class="page-header">
                 <h1>设置</h1>
-                <button class="btn btn-ghost" @click="loadConfig()">🔄 刷新</button>
-            </div>
-
-            <div class="card card-full">
-                <div class="card-header"><span class="card-title">服务器配置</span></div>
-                <div class="card-body">
-                    <div class="info-row"><span class="info-key">监听地址</span><span class="mono" x-text="configData.server?.host + ':' + configData.server?.port"></span></div>
-                    <div class="info-row"><span class="info-key">API Token</span><span x-text="configData.server?.api_token_configured ? '已设置' : '未设置（无认证）'"></span></div>
-                    <div class="info-row"><span class="info-key">管理 Token</span><span x-text="configData.server?.admin_token_configured ? '已单独设置' : (configData.server?.api_token_configured ? '未单独设置（继承 API Token）' : '未设置（无认证）')"></span></div>
+                <div class="config-actions">
+                    <button class="btn btn-ghost" @click="loadConfig()">🔄 重新加载</button>
+                    <button class="btn btn-primary" :disabled="configSaving" @click="saveConfig()" x-text="configSaving ? '保存中…' : '💾 保存并热加载'"></button>
                 </div>
             </div>
-            <div class="card card-full">
-                <div class="card-header"><span class="card-title">日志配置</span></div>
-                <div class="card-body">
-                    <div class="info-row"><span class="info-key">级别</span><span class="mono" x-text="configData.logging?.level"></span></div>
-                    <div class="info-row"><span class="info-key">文件</span><span class="mono" x-text="configData.logging?.file || 'stdout'"></span></div>
-                    <div class="info-row"><span class="info-key">记录请求体</span><span x-text="configData.logging?.log_request_body ? '是' : '否'"></span></div>
-                    <div class="info-row"><span class="info-key">记录 IO</span><span x-text="configData.logging?.log_io ? '是' : '否'"></span></div>
-                </div>
+            <div class="config-notice">
+                保存前会在配置文件旁生成带时间戳的 .bak 备份。渠道、模型、Key、代理、重试、Header 策略和认证配置会立即生效；
+                监听地址/端口、数据库路径和日志文件路径需重启后生效。
             </div>
-            <div class="card card-full">
-                <div class="card-header"><span class="card-title">渠道数</span></div>
-                <div class="card-body">
-                    <div class="info-row"><span class="info-key">已配置渠道</span><span x-text="configData.channels || 0"></span></div>
-                </div>
-            </div>
+            <div class="text-sm text-muted config-path" x-text="configPath ? '配置文件：' + configPath : ''"></div>
+            <div id="configForm" class="config-form"></div>
         </div>
     </main>
 
@@ -403,6 +388,8 @@
             channelsData: [],
             logs: [],
             configData: {},
+            configPath: '',
+            configSaving: false,
             logFilter: { channel: '', status: '', limit: 50 },
             sortKey: '',
             sortDir: 'asc',
@@ -624,8 +611,117 @@
             async loadConfig() {
                 try {
                     const r = await fetch('/admin/api/config');
-                    if (r.ok) this.configData = await r.json();
+                    if (r.ok) {
+                        const d = await r.json();
+                        this.configData = d.config || {};
+                        this.configPath = d.path || '';
+                        this.$nextTick(() => this.renderConfigForm());
+                    } else {
+                        const d = await r.json();
+                        this.showToast(d.error?.message || '读取配置失败');
+                    }
                 } catch {}
+            },
+
+            renderConfigForm() {
+                const root = document.getElementById('configForm');
+                if (!root) return;
+                root.replaceChildren(this.buildConfigNode(this.configData, []));
+            },
+
+            buildConfigNode(value, path) {
+                const wrap = document.createElement('div');
+                if (Array.isArray(value)) {
+                    if (value.every(item => item === null || typeof item !== 'object')) {
+                        const area = document.createElement('textarea');
+                        area.className = 'config-list-input';
+                        area.rows = Math.max(2, Math.min(8, value.length + 1));
+                        area.value = value.join('\n');
+                        area.addEventListener('input', () => this.setConfigValue(path, area.value.split('\n').map(v => v.trim()).filter(Boolean)));
+                        wrap.appendChild(area);
+                        return wrap;
+                    }
+                    wrap.className = 'config-array';
+                    value.forEach((item, index) => {
+                        const group = document.createElement('fieldset');
+                        group.className = 'config-group';
+                        const legend = document.createElement('legend');
+                        legend.textContent = '#' + (index + 1);
+                        group.appendChild(legend);
+                        group.appendChild(this.buildConfigNode(item, path.concat(index)));
+                        wrap.appendChild(group);
+                    });
+                    if (value.length === 0) wrap.textContent = '空列表';
+                    return wrap;
+                }
+                if (value && typeof value === 'object') {
+                    wrap.className = path.length ? 'config-object' : 'config-root';
+                    Object.entries(value).forEach(([key, child]) => {
+                        if (child && typeof child === 'object') {
+                            const section = document.createElement('details');
+                            section.className = 'config-section';
+                            section.open = path.length < 1;
+                            const summary = document.createElement('summary');
+                            summary.textContent = key;
+                            section.appendChild(summary);
+                            section.appendChild(this.buildConfigNode(child, path.concat(key)));
+                            wrap.appendChild(section);
+                        } else {
+                            wrap.appendChild(this.buildConfigField(key, child, path.concat(key)));
+                        }
+                    });
+                    return wrap;
+                }
+                return wrap;
+            },
+
+            buildConfigField(label, value, path) {
+                const row = document.createElement('label');
+                row.className = 'config-field';
+                const name = document.createElement('span');
+                name.textContent = label;
+                row.appendChild(name);
+                const input = document.createElement('input');
+                if (typeof value === 'boolean') {
+                    input.type = 'checkbox';
+                    input.checked = value;
+                    input.addEventListener('change', () => this.setConfigValue(path, input.checked));
+                } else {
+                    input.type = typeof value === 'number' ? 'number' : (value === '********' ? 'password' : 'text');
+                    input.value = value ?? '';
+                    input.addEventListener('input', () => this.setConfigValue(path, typeof value === 'number' ? Number(input.value) : input.value));
+                }
+                row.appendChild(input);
+                return row;
+            },
+
+            setConfigValue(path, value) {
+                let target = this.configData;
+                for (let i = 0; i < path.length - 1; i++) target = target[path[i]];
+                target[path[path.length - 1]] = value;
+            },
+
+            async saveConfig() {
+                if (!confirm('保存配置并立即热加载？')) return;
+                this.configSaving = true;
+                try {
+                    const r = await fetch('/admin/api/config', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ config: this.configData })
+                    });
+                    const d = await r.json();
+                    if (!r.ok) {
+                        this.showToast(d.error?.message || '保存失败');
+                        return;
+                    }
+                    this.showToast('配置已保存并生效，备份：' + d.backup);
+                    await Promise.all([this.loadConfig(), this.fetchStats(), this.loadChannels()]);
+                } catch (e) {
+                    this.showToast('保存失败：' + e.message);
+                } finally {
+                    this.configSaving = false;
+                }
             },
 
             sortKeys(channelId, key) {

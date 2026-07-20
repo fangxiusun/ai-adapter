@@ -14,21 +14,21 @@ import (
 )
 
 type Logger struct {
-	level    slog.Level
-	inner    *slog.Logger
-	file     *lumberjack.Logger
-	mu       sync.Mutex
-	enabled  bool
-	logBody  bool
-	logIO    bool
+	level   slog.Level
+	inner   *slog.Logger
+	file    *lumberjack.Logger
+	mu      sync.Mutex
+	enabled bool
+	logBody bool
+	logIO   bool
 }
 
 // Config holds the logger configuration.
 type Config struct {
-	MaxSizeMB   int
-	MaxBackups  int
-	MaxAgeDays  int
-	Compress    bool
+	MaxSizeMB  int
+	MaxBackups int
+	MaxAgeDays int
+	Compress   bool
 }
 
 // Option defines a functional option for Logger.
@@ -124,6 +124,12 @@ func (l *Logger) SetLogIO(v bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.logIO = v
+}
+
+func (l *Logger) SetLogRequestBody(v bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.logBody = v
 }
 
 func (l *Logger) Close() {
@@ -298,7 +304,6 @@ func parseLevel(s string) slog.Level {
 		return slog.LevelInfo
 	}
 }
-
 
 func prettyJSON(data []byte) string {
 	if len(data) == 0 {

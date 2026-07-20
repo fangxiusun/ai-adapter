@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -21,16 +25,23 @@ import (
 )
 
 type WebHandler struct {
-	channels *channel.ChannelManager
-	db       *db.DB
-	config   *config.Config
-	stats    *stats.Stats
-	wsHub    *websocket.Hub
-	version  string
+	channels     *channel.ChannelManager
+	db           *db.DB
+	config       *config.Config
+	stats        *stats.Stats
+	wsHub        *websocket.Hub
+	version      string
+	configPath   string
+	reloadConfig func(*config.Config) error
+	configMu     sync.RWMutex
 }
 
 func NewWebHandler(channels *channel.ChannelManager, database *db.DB, cfg *config.Config, statsInstance *stats.Stats, hub *websocket.Hub, version string) *WebHandler {
 	return &WebHandler{channels: channels, db: database, config: cfg, stats: statsInstance, wsHub: hub, version: version}
+}
+
+func (h *WebHandler) EnableConfigEditing(path string, reload func(*config.Config) error) {
+	h.configPath, h.reloadConfig = path, reload
 }
 
 func (h *WebHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -280,6 +291,17 @@ func isSecretConfigured(secret string) bool {
 }
 
 func (h *WebHandler) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if h.configPath != "" {
+		switch r.Method {
+		case http.MethodGet:
+			h.handleEditableConfig(w)
+		case http.MethodPut:
+			h.handleSaveConfig(w, r)
+		default:
+			h.jsonError(w, 405, "method_not_allowed", "use GET or PUT")
+		}
+		return
+	}
 	if r.Method == "GET" {
 		var proxies []map[string]interface{}
 		for _, p := range h.config.Proxies {
@@ -299,6 +321,168 @@ func (h *WebHandler) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.jsonError(w, 405, "method_not_allowed", "use GET")
+}
+
+const secretPlaceholder = "********"
+
+func (h *WebHandler) handleEditableConfig(w http.ResponseWriter) {
+	h.configMu.RLock()
+	defer h.configMu.RUnlock()
+	data, err := os.ReadFile(h.configPath)
+	if err != nil {
+		h.jsonError(w, 500, "read_failed", err.Error())
+		return
+	}
+	var value interface{}
+	if err := yaml.Unmarshal(data, &value); err != nil {
+		h.jsonError(w, 500, "parse_failed", err.Error())
+		return
+	}
+	maskConfigSecrets(value)
+	h.json(w, 200, map[string]interface{}{"config": value, "path": h.configPath})
+}
+
+func (h *WebHandler) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
+	var body struct{ Config interface{} }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&body); err != nil {
+		h.jsonError(w, 400, "invalid_body", err.Error())
+		return
+	}
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	original, err := os.ReadFile(h.configPath)
+	if err != nil {
+		h.jsonError(w, 500, "read_failed", err.Error())
+		return
+	}
+	var oldValue interface{}
+	if err := yaml.Unmarshal(original, &oldValue); err != nil {
+		h.jsonError(w, 500, "parse_failed", err.Error())
+		return
+	}
+	restoreConfigSecrets(body.Config, oldValue)
+	data, err := yaml.Marshal(body.Config)
+	if err != nil {
+		h.jsonError(w, 400, "marshal_failed", err.Error())
+		return
+	}
+	next, err := config.Parse(data)
+	if err != nil {
+		h.jsonError(w, 400, "validation_failed", err.Error())
+		return
+	}
+	backup := h.configPath + "." + time.Now().Format("20060102-150405.000") + ".bak"
+	if err := os.WriteFile(backup, original, 0600); err != nil {
+		h.jsonError(w, 500, "backup_failed", err.Error())
+		return
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(h.configPath), ".config-*.tmp")
+	if err != nil {
+		h.jsonError(w, 500, "save_failed", err.Error())
+		return
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err = tmp.Write(data); err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmpName, h.configPath)
+	}
+	// Windows does not replace an existing destination with os.Rename.
+	if err != nil {
+		err = os.WriteFile(h.configPath, data, 0600)
+	}
+	if err != nil {
+		h.jsonError(w, 500, "save_failed", err.Error())
+		return
+	}
+	if h.reloadConfig != nil {
+		if err := h.reloadConfig(next); err != nil {
+			h.jsonError(w, 500, "reload_failed", err.Error())
+			return
+		}
+	}
+	h.json(w, 200, map[string]interface{}{
+		"ok":                      true,
+		"backup":                  backup,
+		"restart_required_fields": []string{"server.host", "server.port", "database.path", "logging.file", "server.admin_allowed_origins"},
+	})
+}
+
+func maskConfigSecrets(value interface{}) {
+	m, ok := value.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if server, ok := m["server"].(map[string]interface{}); ok {
+		for _, key := range []string{"api_token", "admin_token"} {
+			if s, ok := server[key].(string); ok && s != "" {
+				server[key] = secretPlaceholder
+			}
+		}
+	}
+	if proxies, ok := m["proxies"].([]interface{}); ok {
+		for _, item := range proxies {
+			if proxy, ok := item.(map[string]interface{}); ok {
+				if s, ok := proxy["url"].(string); ok && s != "" {
+					proxy["url"] = secretPlaceholder
+				}
+			}
+		}
+	}
+	if channels, ok := m["channels"].([]interface{}); ok {
+		for _, item := range channels {
+			channelConfig, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if keys, ok := channelConfig["keys"].([]interface{}); ok {
+				for _, keyItem := range keys {
+					if key, ok := keyItem.(map[string]interface{}); ok {
+						if s, ok := key["value"].(string); ok && s != "" {
+							key["value"] = secretPlaceholder
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func restoreConfigSecrets(current, old interface{}) {
+	currentMap, currentOK := current.(map[string]interface{})
+	oldMap, oldOK := old.(map[string]interface{})
+	if !currentOK || !oldOK {
+		return
+	}
+	for key, currentValue := range currentMap {
+		oldValue, exists := oldMap[key]
+		if !exists {
+			continue
+		}
+		if currentValue == secretPlaceholder {
+			currentMap[key] = oldValue
+			continue
+		}
+		switch typed := currentValue.(type) {
+		case map[string]interface{}:
+			restoreConfigSecrets(typed, oldValue)
+		case []interface{}:
+			oldSlice, ok := oldValue.([]interface{})
+			if !ok {
+				continue
+			}
+			for i := range typed {
+				if i < len(oldSlice) {
+					restoreConfigSecrets(typed[i], oldSlice[i])
+				}
+			}
+		}
+	}
 }
 
 // maskProxyURL masks the password in proxy URLs like socks5://user:pass@host:port

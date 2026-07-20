@@ -89,11 +89,11 @@ func buildHTTPClient(cfg config.ChannelConfig, proxies []config.ProxyConfig) *ht
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout:  60 * time.Second,
-		ExpectContinueTimeout:  1 * time.Second,
-		MaxIdleConns:           100,
-		MaxIdleConnsPerHost:    10,
-		IdleConnTimeout:        90 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
 	}
 
 	// Find and apply proxy if configured
@@ -243,6 +243,20 @@ func (cm *ChannelManager) SelectBalanced(candidates []*Channel) *Channel {
 	return cm.balancer.Select(candidates)
 }
 
+// Reload atomically replaces the channel set used by new requests.
+func (cm *ChannelManager) Reload(cfgs []config.ChannelConfig, proxies []config.ProxyConfig, loadBalanceStrategy string) {
+	next := NewChannelManager(cfgs, proxies, cm.logger, cm.database, loadBalanceStrategy)
+	cm.mu.Lock()
+	oldChannels := cm.channels
+	cm.channels, cm.defaultID = next.channels, next.defaultID
+	cm.modelIndex, cm.balancer = next.modelIndex, next.balancer
+	cm.mu.Unlock()
+	for _, ch := range oldChannels {
+		ch.keyPool.SaveToDB()
+		ch.keyPool.Stop()
+	}
+}
+
 // ReorderCandidates reorders candidates so that the balanced selection comes first,
 // followed by the remaining channels in their original order.
 // This ensures failover starts from the balanced-selected channel.
@@ -278,7 +292,6 @@ func (ch *Channel) ReportChannelSuccess() {
 func (ch *Channel) ReportChannelFailure() {
 	ch.health.ReportFailure()
 }
-
 
 func (ch *Channel) ResolveModel(clientModel string) (ModelInfo, bool) {
 	if m, ok := ch.models[clientModel]; ok {

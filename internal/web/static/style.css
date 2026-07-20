@@ -427,6 +427,62 @@ h3 {
 .text-muted { color: var(--text-muted) !important; }
 .text-center { text-align: center; }
 
+/* ===== Configuration editor ===== */
+.config-actions { display: flex; gap: 8px; }
+.config-notice {
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border: 1px solid #bfdbfe;
+    border-radius: var(--radius);
+    background: var(--blue-bg);
+    color: #1d4ed8;
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+.config-path { margin: 10px 0 16px; }
+.config-form { display: grid; gap: 12px; }
+.config-section, .config-group {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+.config-section > summary {
+    cursor: pointer;
+    padding: 14px 18px;
+    font-weight: 650;
+    background: #fafbfc;
+}
+.config-section > .config-object,
+.config-section > .config-array,
+.config-section > .config-list-input { margin: 0 18px 18px; }
+.config-object { display: grid; gap: 10px; padding-top: 12px; }
+.config-array { display: grid; gap: 12px; padding-top: 12px; }
+.config-group { padding: 10px 14px 14px; }
+.config-group legend { padding: 0 6px; color: var(--text-secondary); font-size: 0.8rem; }
+.config-field {
+    display: grid;
+    grid-template-columns: minmax(180px, 260px) 1fr;
+    align-items: center;
+    gap: 14px;
+    font-size: 0.85rem;
+}
+.config-field > span { color: var(--text-secondary); font-family: 'SF Mono', 'Consolas', monospace; }
+.config-field input[type='text'],
+.config-field input[type='password'],
+.config-field input[type='number'],
+.config-list-input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+    font-family: 'SF Mono', 'Consolas', monospace;
+}
+.config-list-input { resize: vertical; margin-top: 10px; }
+.btn:disabled { opacity: 0.6; cursor: wait; }
+
 /* ===== Responsive ===== */
 @media (max-width: 768px) {
     .sidebar { width: 60px; }
@@ -437,6 +493,7 @@ h3 {
     .main { margin-left: 60px; padding: 16px; }
     .url-grid { grid-template-columns: 1fr; }
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .config-field { grid-template-columns: 1fr; gap: 5px; }
 }
 
 /* Charts */
