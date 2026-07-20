@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
@@ -37,6 +36,7 @@ func (h *ProxyHandler) fanoutForward(w http.ResponseWriter, r *http.Request, req
 	deepLog.LogUpstreamRequestBody(body)
 
 	start := time.Now()
+	h.logChannelRequest(reqID, ch, "", url, len(body))
 	result := ch.Fanout(r.Context(), channel.FanoutRequest{
 		Body:    body,
 		URL:     url,
@@ -45,9 +45,10 @@ func (h *ProxyHandler) fanoutForward(w http.ResponseWriter, r *http.Request, req
 	latency := time.Since(start).Milliseconds()
 
 	if result.Error != nil {
-		h.logger.Warn("fanout_failed", "request_id", reqID, "channel", ch.Config.ID, "error", result.Error)
+		h.logger.RequestWarn(reqID, "子渠道并发请求失败", "channel_id", ch.Config.ID, "error", result.Error)
 		return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: fanout failed: %s", ch.Config.ID, result.Error)}
 	}
+	h.logChannelResponse(reqID, ch, result.Key, result.StatusCode, len(result.Response), latency)
 
 	// Success
 	ch.RecordLatency(result.Key, latency)
@@ -66,7 +67,6 @@ func (h *ProxyHandler) fanoutForward(w http.ResponseWriter, r *http.Request, req
 	deepLog.LogClientResponseBody(result.Response)
 
 	h.recordLog(reqID, ch.Config.ID, string(iface), string(iface), model, model, result.StatusCode, latency, result.Key, "", "", pt, ct, tt, usageJSON, string(iface))
-	h.logger.LogRequest(reqID, "POST", path, result.StatusCode, latency, result.Key, ch.Config.ID, model)
 	return nil
 }
 
@@ -84,10 +84,6 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 	}
 
 	path := upstreamPathForInterface(iface, model, stream)
-	logPath := path
-	if idx := strings.Index(logPath, "?"); idx >= 0 {
-		logPath = logPath[:idx]
-	}
 	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
 	for {
 		if fe := h.checkRotationAndTimeout(ch, rs, reqID); fe != nil {
@@ -110,22 +106,24 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		}
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(body)
+		h.logChannelRequest(reqID, ch, key.Value, url, len(body))
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "connection_error")
+			h.logger.RequestWarn(reqID, "子渠道请求失败", "channel_id", ch.Config.ID, "channel_key", util.MaskKey(key.Value), "reason", "connection_error", "error", err)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
 			}
 			continue
 		}
+		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, rs.elapsed().Milliseconds())
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
 			ch.ReportError(key.Value, 401)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "unauthorized", "status", 401)
+			h.logger.RequestWarn(reqID, "渠道 Key 被排除", "channel_id", ch.Config.ID, "channel_key", util.MaskKey(key.Value), "reason", "unauthorized", "status", 401)
 			rs.consecFails = 0
 			continue
 		}
@@ -133,7 +131,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, 429)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "rate_limited", "status", 429)
+			h.logger.RequestWarn(reqID, "渠道 Key 被排除", "channel_id", ch.Config.ID, "channel_key", util.MaskKey(key.Value), "reason", "rate_limited", "status", 429)
 			time.Sleep(rs.retryDelay)
 			continue
 		}
@@ -141,7 +139,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
+			h.logger.RequestWarn(reqID, "渠道 Key 被排除", "channel_id", ch.Config.ID, "channel_key", util.MaskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
@@ -152,9 +150,8 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
 			resp.Body.Close()
 			ch.ReportError(key.Value, 400)
-			h.logger.Warn("upstream_400",
-				"request_id", reqID,
-				"channel", ch.Config.ID,
+			h.logger.RequestWarn(reqID, "子渠道返回错误",
+				"channel_id", ch.Config.ID,
 				"status", 400,
 				"upstream_body", string(errBodyBytes),
 			)
@@ -167,9 +164,8 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
 			rs.consecFails = 0
-			h.logger.Warn("upstream_error",
-				"request_id", reqID,
-				"channel", ch.Config.ID,
+			h.logger.RequestWarn(reqID, "子渠道返回错误",
+				"channel_id", ch.Config.ID,
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
@@ -196,7 +192,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		} else {
 			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
 			if readErr != nil {
-				h.logger.Warn("upstream_body_read_error", "request_id", reqID, "channel", ch.Config.ID, "error", readErr)
+				h.logger.RequestWarn(reqID, "读取子渠道应答失败", "channel_id", ch.Config.ID, "error", readErr)
 			}
 			deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 			deepLog.LogUpstreamResponseBody(respBody)
@@ -214,7 +210,6 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
 		h.recordLog(reqID, ch.Config.ID, string(iface), string(iface), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(iface))
-		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return nil
 	}
 }
@@ -239,10 +234,6 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 	}
 
 	path := upstreamPathForInterface(source, model, false)
-	logPath := path
-	if idx := strings.Index(logPath, "?"); idx >= 0 {
-		logPath = logPath[:idx]
-	}
 	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
 	var result *UpstreamResult
 	for {
@@ -264,7 +255,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if processed := h.processRequestHeaders(ch, model, r.Header); processed != nil {
 			applyProcessedHeaders(httpReq.Header, processed, "Content-Type", "Authorization")
 		}
-		h.logger.Debug("upstream request", "request_id", reqID, "method", "POST", "url", url, "body", string(sourceBody))
+		h.logChannelRequest(reqID, ch, key.Value, url, len(sourceBody))
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
 		start := time.Now()
@@ -272,7 +263,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if err != nil {
 			ch.ReportError(key.Value, 0)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "connection_error")
+			h.logger.RequestWarn(reqID, "子渠道请求失败", "channel_id", ch.Config.ID, "channel_key", util.MaskKey(key.Value), "reason", "connection_error", "error", err)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
@@ -281,10 +272,11 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		}
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))
 		if readErr != nil {
-			h.logger.Warn("upstream_body_read_error", "request_id", reqID, "channel", ch.Config.ID, "error", readErr)
+			h.logger.RequestWarn(reqID, "读取子渠道应答失败", "channel_id", ch.Config.ID, "error", readErr)
 		}
 		resp.Body.Close()
 		latency := time.Since(start).Milliseconds()
+		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, len(respBody), latency)
 		if resp.StatusCode == 401 {
 			ch.ReportError(key.Value, 401)
 			rs.excluded[key.Value] = true
@@ -293,14 +285,14 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 		if resp.StatusCode == 429 {
 			ch.ReportError(key.Value, 429)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "rate_limited", "status", 429)
+			h.logger.RequestWarn(reqID, "渠道 Key 被排除", "channel_id", ch.Config.ID, "channel_key", util.MaskKey(key.Value), "reason", "rate_limited", "status", 429)
 			time.Sleep(rs.retryDelay)
 			continue
 		}
 		if resp.StatusCode >= 500 {
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
-			h.logger.Warn("key_excluded", "request_id", reqID, "channel", ch.Config.ID, "key", util.MaskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
+			h.logger.RequestWarn(reqID, "渠道 Key 被排除", "channel_id", ch.Config.ID, "channel_key", util.MaskKey(key.Value), "reason", "server_error", "status", resp.StatusCode)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
 				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
@@ -318,9 +310,8 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
 			rs.consecFails = 0
-			h.logger.Warn("upstream_error",
-				"request_id", reqID,
-				"channel", ch.Config.ID,
+			h.logger.RequestWarn(reqID, "子渠道返回错误",
+				"channel_id", ch.Config.ID,
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
@@ -357,7 +348,6 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 	json.NewEncoder(w).Encode(targetResp)
 	pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
 	h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, result.LatencyMs, result.Key.Value, "", "", pt, ct, tt, usageJSON, string(target))
-	h.logger.LogRequest(reqID, "POST", logPath, 200, result.LatencyMs, result.Key.Value, ch.Config.ID, model)
 	return nil
 }
 
@@ -377,6 +367,7 @@ func (h *ProxyHandler) convertedFanoutForward(w http.ResponseWriter, r *http.Req
 	deepLog.LogUpstreamRequestBody(sourceBody)
 
 	start := time.Now()
+	h.logChannelRequest(reqID, ch, "", url, len(sourceBody))
 	result := ch.Fanout(r.Context(), channel.FanoutRequest{
 		Body:    sourceBody,
 		URL:     url,
@@ -385,9 +376,10 @@ func (h *ProxyHandler) convertedFanoutForward(w http.ResponseWriter, r *http.Req
 	latency := time.Since(start).Milliseconds()
 
 	if result.Error != nil {
-		h.logger.Warn("converted_fanout_failed", "request_id", reqID, "channel", ch.Config.ID, "error", result.Error)
+		h.logger.RequestWarn(reqID, "子渠道并发请求失败", "channel_id", ch.Config.ID, "error", result.Error)
 		return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: converted fanout failed: %s", ch.Config.ID, result.Error)}
 	}
+	h.logChannelResponse(reqID, ch, result.Key, result.StatusCode, len(result.Response), latency)
 
 	ch.RecordLatency(result.Key, latency)
 
@@ -417,7 +409,6 @@ func (h *ProxyHandler) convertedFanoutForward(w http.ResponseWriter, r *http.Req
 
 	pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
 	h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, latency, result.Key, "", "", pt, ct, tt, usageJSON, string(target))
-	h.logger.LogRequest(reqID, "POST", path, 200, latency, result.Key, ch.Config.ID, model)
 	return nil
 }
 

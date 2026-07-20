@@ -35,6 +35,7 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	deepLog.LogUpstreamRequestBody(sourceBody)
 
 	start := time.Now()
+	h.logChannelRequest(reqID, ch, "", url, len(sourceBody))
 	result := ch.FanoutStream(r.Context(), channel.FanoutRequest{
 		Body:    sourceBody,
 		URL:     url,
@@ -42,12 +43,13 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	})
 
 	if result.Error != nil {
-		h.logger.Warn("fanout_stream_failed", "request_id", reqID, "channel", ch.Config.ID, "error", result.Error)
+		h.logger.RequestWarn(reqID, "子渠道并发流式请求失败", "channel_id", ch.Config.ID, "error", result.Error)
 		return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: fanout stream failed: %s", ch.Config.ID, result.Error)}
 	}
 
 	resp := result.Response
 	defer resp.Body.Close()
+	h.logChannelResponse(reqID, ch, result.Key, resp.StatusCode, -1, time.Since(start).Milliseconds())
 
 	ch.RecordLatency(result.Key, time.Since(start).Milliseconds())
 	ch.ReportSuccess(result.Key)
@@ -85,7 +87,6 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 
 	pt, ct, tt, usageJSON := capture.Usage()
 	h.recordLog(reqID, ch.Config.ID, string(target), string(target), model, model, 200, time.Since(start).Milliseconds(), result.Key, "", "", pt, ct, tt, usageJSON, string(target))
-	h.logger.LogRequest(reqID, "POST", path, 200, time.Since(start).Milliseconds(), result.Key, ch.Config.ID, model)
 	return nil
 }
 
@@ -101,7 +102,6 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		return nil
 	}
 	path := upstreamPathForInterface(config.InterfaceChat, model, true)
-	logPath := "/v1/chat/completions"
 
 	// Fanout fast-path for streaming requests.
 	if ch.FanoutEnabled() {
@@ -129,6 +129,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		}
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
+		h.logChannelRequest(reqID, ch, key.Value, url, len(sourceBody))
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
 			ch.ReportError(key.Value, 0)
@@ -139,6 +140,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			}
 			continue
 		}
+		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, rs.elapsed().Milliseconds())
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
 			ch.ReportError(key.Value, 401)
@@ -176,9 +178,8 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
 			rs.consecFails = 0
-			h.logger.Warn("upstream_error",
-				"request_id", reqID,
-				"channel", ch.Config.ID,
+			h.logger.RequestWarn(reqID, "子渠道返回错误",
+				"channel_id", ch.Config.ID,
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
@@ -220,7 +221,6 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
 		h.recordLog(reqID, ch.Config.ID, string(target), string(config.InterfaceChat), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
-		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return nil
 	}
 }
@@ -237,10 +237,6 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		return nil
 	}
 	path := upstreamPathForInterface(source, model, true)
-	logPath := path
-	if idx := strings.Index(logPath, "?"); idx >= 0 {
-		logPath = logPath[:idx]
-	}
 	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
 	for {
 		if fe := h.checkRotationAndTimeout(ch, rs, reqID); fe != nil {
@@ -263,6 +259,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		}
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
+		h.logChannelRequest(reqID, ch, key.Value, url, len(sourceBody))
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
 			ch.ReportError(key.Value, 0)
@@ -273,6 +270,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			}
 			continue
 		}
+		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, rs.elapsed().Milliseconds())
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
 			ch.ReportError(key.Value, 401)
@@ -310,9 +308,8 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
 			rs.consecFails = 0
-			h.logger.Warn("upstream_error",
-				"request_id", reqID,
-				"channel", ch.Config.ID,
+			h.logger.RequestWarn(reqID, "子渠道返回错误",
+				"channel_id", ch.Config.ID,
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
@@ -349,7 +346,6 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		h.emitStreamResponse(w, target, chatResp, chatReq, targetReq, flusher)
 		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
 		h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
-		h.logger.LogRequest(reqID, "POST", logPath, 200, rs.elapsed().Milliseconds(), key.Value, ch.Config.ID, model)
 		return nil
 	}
 }

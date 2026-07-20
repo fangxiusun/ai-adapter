@@ -37,8 +37,6 @@ func (ch *Channel) Fanout(ctx context.Context, req FanoutRequest) *FanoutResult 
 		return &FanoutResult{Error: fmt.Errorf("no available keys")}
 	}
 
-	ch.logger.LogFanout(ch.Config.ID, len(keys), ch.Config.KeyStrategy)
-
 	// Create a cancellable context so we can stop remaining goroutines early.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -195,8 +193,6 @@ func (ch *Channel) FanoutStream(ctx context.Context, req FanoutRequest) *FanoutS
 	if len(keys) == 0 {
 		return &FanoutStreamResult{Error: fmt.Errorf("no available keys")}
 	}
-
-	ch.logger.LogFanout(ch.Config.ID, len(keys), ch.Config.KeyStrategy)
 
 	ctx, cancel := context.WithCancel(ctx)
 

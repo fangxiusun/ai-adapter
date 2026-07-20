@@ -1,9 +1,9 @@
 package proxy
 
 import (
-	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"encoding/json"
 	"fmt"
+	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"net/http"
 	"strings"
 	"time"
@@ -19,9 +19,7 @@ func (h *ProxyHandler) sendError(w http.ResponseWriter, reqID string, status int
 		status = 502
 	}
 
-	// Log the error with request context
-	h.logger.Error("api_error",
-		"request_id", reqID,
+	h.logger.RequestError(reqID, "返回错误应答",
 		"status", status,
 		"error_code", code,
 		"error_message", message,
@@ -32,11 +30,13 @@ func (h *ProxyHandler) sendError(w http.ResponseWriter, reqID string, status int
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"error": map[string]interface{}{"type": "error", "code": code, "message": message, "status": status},
 	})
+	h.finishRequestLog(reqID, status, 0)
 }
 
 // recordLog inserts a request log entry into the database with usage data
 // and records Prometheus metrics.
 func (h *ProxyHandler) recordLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string, apiType string) {
+	h.setRequestRouteLog(reqID, channelID, key, upstreamModel)
 	if h.db != nil {
 		h.db.InsertLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, upstreamModel, status, latencyMs, key, errorCode, errorMsg, promptTokens, completionTokens, totalTokens, usageJSON)
 	}
@@ -84,6 +84,7 @@ func (h *ProxyHandler) recordLog(reqID, channelID, clientAPI, upstreamAPI, clien
 			"timestamp":  time.Now().Format(time.RFC3339),
 		})
 	}
+	h.finishRequestLog(reqID, status, latencyMs)
 }
 
 func generateRequestID() string {
@@ -198,7 +199,6 @@ func toInt(v interface{}) int {
 	return 0
 }
 
-
 // replaceModelInBody replaces the "model" field in a JSON request body with the given upstream model ID.
 // Returns the original body if parsing fails or if the models are already the same.
 func replaceModelInBody(body []byte, clientModel, upstreamModel string) []byte {
@@ -219,6 +219,7 @@ func replaceModelInBody(body []byte, clientModel, upstreamModel string) []byte {
 	}
 	return out
 }
+
 // injectStreamOptions ensures stream_options.include_usage is true for Chat requests
 // unless the user explicitly set it to false. Modifies body in-place and returns
 // the (possibly new) body bytes.

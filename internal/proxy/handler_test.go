@@ -70,6 +70,14 @@ func TestHandleChatReturnsErrorWhenSingleChannelRequestFails(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"error"`) {
 		t.Fatalf("expected json error body, got %q", rec.Body.String())
 	}
+	remaining := 0
+	handler.requestLogs.Range(func(_, _ any) bool {
+		remaining++
+		return true
+	})
+	if remaining != 0 {
+		t.Fatalf("request log metadata leaked after request: %d", remaining)
+	}
 }
 
 func TestHandleModelsRejectsNonGetRequests(t *testing.T) {

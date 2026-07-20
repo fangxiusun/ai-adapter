@@ -22,7 +22,6 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"github.com/fangxiusun/ai-adapter/internal/proxy"
 	"github.com/fangxiusun/ai-adapter/internal/stats"
-	"github.com/fangxiusun/ai-adapter/internal/util"
 	"github.com/fangxiusun/ai-adapter/internal/web"
 	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
@@ -134,7 +133,6 @@ func main() {
 	debugHandler.RegisterRoutes(mux)
 
 	middleware := chainMiddleware(mux,
-		loggingMiddleware(logger),
 		corsMiddlewareConfig(cfg),
 		authMiddlewareConfig(cfg),
 		adminAuthMiddlewareConfig(cfg),
@@ -206,33 +204,6 @@ func adminAuthMiddlewareConfig(cfg *config.Config) func(http.Handler) http.Handl
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			adminAuthMiddleware(cfg.Server.AdminToken)(next).ServeHTTP(w, r)
-		})
-	}
-}
-
-func loggingMiddleware(logger *applog.Logger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			model := util.ExtractModelFromRequest(r, 4*1024)
-
-			bodyToClose := r.Body
-			defer func() {
-				if bodyToClose != nil {
-					_ = bodyToClose.Close()
-				}
-			}()
-
-			next.ServeHTTP(w, r)
-			if strings.HasPrefix(r.URL.Path, "/v1/") ||
-				strings.HasPrefix(r.URL.Path, "/v1beta/") {
-				logger.Debug("http_request",
-					"method", r.Method,
-					"path", r.URL.Path,
-					"model", model,
-					"latency_ms", time.Since(start).Milliseconds(),
-				)
-			}
 		})
 	}
 }

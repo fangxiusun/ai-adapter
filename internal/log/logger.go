@@ -176,16 +176,31 @@ func (l *Logger) Error(msg string, args ...any) {
 	l.inner.Error(msg, args...)
 }
 
+func (l *Logger) RequestDebug(reqID, scene string, args ...any) {
+	l.Debug("request_event", append([]any{"request_id", reqID, "scene", scene}, args...)...)
+}
+
+func (l *Logger) RequestInfo(reqID, scene string, args ...any) {
+	l.Info("request_event", append([]any{"request_id", reqID, "scene", scene}, args...)...)
+}
+
+func (l *Logger) RequestWarn(reqID, scene string, args ...any) {
+	l.Warn("request_event", append([]any{"request_id", reqID, "scene", scene}, args...)...)
+}
+
+func (l *Logger) RequestError(reqID, scene string, args ...any) {
+	l.Error("request_event", append([]any{"request_id", reqID, "scene", scene}, args...)...)
+}
+
 func (l *Logger) LogRequest(reqID, method, path string, status int, latencyMs int64, key, channel, model string) {
-	l.Info("request",
-		"request_id", reqID,
+	l.RequestInfo(reqID, "请求完成",
 		"method", method,
 		"path", path,
 		"status", status,
 		"latency_ms", latencyMs,
 		"key", util.MaskKey(key),
-		"channel", channel,
-		"model", model,
+		"channel_id", channel,
+		"client_model", model,
 	)
 }
 
@@ -193,14 +208,14 @@ func (l *Logger) LogRequestBody(reqID string, body []byte) {
 	if !l.logBody {
 		return
 	}
-	l.Debug("request_body", "request_id", reqID, "body_len", len(body))
+	l.RequestDebug(reqID, "接收请求体", "body_bytes", len(body))
 }
 
 func (l *Logger) LogResponseBody(reqID string, body []byte) {
 	if !l.logBody {
 		return
 	}
-	l.Debug("response_body", "request_id", reqID, "body_len", len(body))
+	l.RequestDebug(reqID, "接收渠道应答体", "body_bytes", len(body))
 }
 
 func (l *Logger) LogClientInput(reqID string, body []byte) {
@@ -208,8 +223,7 @@ func (l *Logger) LogClientInput(reqID string, body []byte) {
 		return
 	}
 	pretty := prettyJSON(body)
-	l.Info("client_input",
-		"request_id", reqID,
+	l.RequestInfo(reqID, "接收请求",
 		"body", pretty,
 	)
 }
@@ -219,8 +233,7 @@ func (l *Logger) LogClientOutput(reqID string, body []byte) {
 		return
 	}
 	pretty := prettyJSON(body)
-	l.Info("client_output",
-		"request_id", reqID,
+	l.RequestInfo(reqID, "返回应答",
 		"body", pretty,
 	)
 }
@@ -230,8 +243,7 @@ func (l *Logger) LogSSEEvent(reqID string, event string, data []byte) {
 		return
 	}
 	pretty := prettyJSON(data)
-	l.Info("sse_event",
-		"request_id", reqID,
+	l.RequestInfo(reqID, "返回流式应答",
 		"event", event,
 		"data", pretty,
 	)
@@ -244,8 +256,7 @@ func (l *Logger) LogSSEDelta(reqID string, deltaType string, content string) {
 	if len(content) > 500 {
 		content = content[:500] + "...(truncated)"
 	}
-	l.Info("sse_delta",
-		"request_id", reqID,
+	l.RequestInfo(reqID, "返回流式应答片段",
 		"type", deltaType,
 		"content", content,
 	)

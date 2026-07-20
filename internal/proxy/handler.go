@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/metrics"
@@ -19,6 +20,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/log"
 	"github.com/fangxiusun/ai-adapter/internal/stats"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
+	"github.com/fangxiusun/ai-adapter/internal/util"
 	"github.com/fangxiusun/ai-adapter/internal/websocket"
 )
 
@@ -32,11 +34,105 @@ type ProxyHandler struct {
 	headerEngine *headerpolicy.Engine
 	stats        *stats.Stats
 	wsHub        *websocket.Hub
+	requestLogs  sync.Map
+}
+
+type requestLogMeta struct {
+	start         time.Time
+	method        string
+	path          string
+	requestBytes  int
+	responseBytes int
+	clientModel   string
+	channelID     string
+	key           string
+	upstreamModel string
 }
 
 // NewProxyHandler creates a new ProxyHandler.
 func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config, deepDebug *debuglog.DeepDebugLogger, headerEngine *headerpolicy.Engine, statsInstance *stats.Stats, hub *websocket.Hub) *ProxyHandler {
 	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug, headerEngine: headerEngine, stats: statsInstance, wsHub: hub}
+}
+
+func (h *ProxyHandler) beginRequestLog(reqID string, r *http.Request) {
+	h.requestLogs.Store(reqID, &requestLogMeta{start: time.Now(), method: r.Method, path: r.URL.Path})
+	h.logger.RequestInfo(reqID, "接收请求", "method", r.Method, "path", r.URL.Path)
+}
+
+func (h *ProxyHandler) updateRequestLog(reqID string, update func(*requestLogMeta)) {
+	if value, ok := h.requestLogs.Load(reqID); ok {
+		update(value.(*requestLogMeta))
+	}
+}
+
+func (h *ProxyHandler) setRequestBodyLog(reqID string, body []byte, model string) {
+	h.updateRequestLog(reqID, func(meta *requestLogMeta) {
+		meta.requestBytes = len(body)
+		if model != "" {
+			meta.clientModel = model
+		}
+	})
+}
+
+func (h *ProxyHandler) setRequestRouteLog(reqID, channelID, key, upstreamModel string) {
+	h.updateRequestLog(reqID, func(meta *requestLogMeta) {
+		if channelID != "" {
+			meta.channelID = channelID
+		}
+		if key != "" {
+			meta.key = key
+		}
+		if upstreamModel != "" && meta.upstreamModel == "" {
+			meta.upstreamModel = upstreamModel
+		}
+	})
+}
+
+func (h *ProxyHandler) logChannelRequest(reqID string, ch *channel.Channel, key, url string, bodyBytes int) {
+	h.setRequestRouteLog(reqID, ch.Config.ID, key, "")
+	h.logger.RequestInfo(reqID, "请求子渠道",
+		"channel_id", ch.Config.ID,
+		"channel_key", util.MaskKey(key),
+		"url", url,
+		"request_bytes", bodyBytes,
+	)
+}
+
+func (h *ProxyHandler) logChannelResponse(reqID string, ch *channel.Channel, key string, status int, responseBytes int, latencyMs int64) {
+	if responseBytes >= 0 {
+		h.updateRequestLog(reqID, func(meta *requestLogMeta) { meta.responseBytes = responseBytes })
+	}
+	h.logger.RequestInfo(reqID, "得到子渠道应答",
+		"channel_id", ch.Config.ID,
+		"channel_key", util.MaskKey(key),
+		"status", status,
+		"response_bytes", responseBytes,
+		"latency_ms", latencyMs,
+	)
+}
+
+func (h *ProxyHandler) finishRequestLog(reqID string, status int, fallbackLatencyMs int64) {
+	value, ok := h.requestLogs.LoadAndDelete(reqID)
+	if !ok {
+		return
+	}
+	meta := value.(*requestLogMeta)
+	latencyMs := time.Since(meta.start).Milliseconds()
+	if latencyMs <= 0 {
+		latencyMs = fallbackLatencyMs
+	}
+	h.logger.RequestInfo(reqID, "请求完成",
+		"client_model", meta.clientModel,
+		"channel_id", meta.channelID,
+		"channel_key", util.MaskKey(meta.key),
+		"upstream_model", meta.upstreamModel,
+		"status", status,
+		"request_bytes", meta.requestBytes,
+		"response_bytes", meta.responseBytes,
+		"latency_ms", latencyMs,
+		"method", meta.method,
+		"path", meta.path,
+	)
 }
 
 // maxRequestBodyBytes returns the maximum allowed request body size in bytes.
@@ -66,8 +162,7 @@ func (h *ProxyHandler) readRequestBody(w http.ResponseWriter, reqID string, r *h
 
 	// Check if body was truncated
 	if int64(len(body)) > maxSize {
-		h.logger.Warn("request_body_truncated",
-			"request_id", reqID,
+		h.logger.RequestWarn(reqID, "请求体超过限制",
 			"original_size_hint", fmt.Sprintf(">%dMB", maxSize/1024/1024),
 			"truncated_size", len(body),
 			"max_allowed", maxSize,
@@ -172,13 +267,14 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	defer metrics.DecActiveRequests()
 
 	reqID := generateRequestID()
-	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/chat/completions", "target", "chat")
+	h.beginRequestLog(reqID, r)
 	body, err := h.readRequestBody(w, reqID, r)
 	if err != nil {
 		h.sendError(w, reqID, 400, "read_body_failed", err.Error())
 		return
 	}
 	body = stripUTF8BOM(body)
+	h.setRequestBodyLog(reqID, body, "")
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
 	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
@@ -194,6 +290,7 @@ func (h *ProxyHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		h.sendError(w, reqID, 400, "missing_model", "model is required")
 		return
 	}
+	h.setRequestBodyLog(reqID, body, req.Model)
 	candidates := h.channels.SelectChannelCandidates(req.Model)
 	if len(candidates) == 0 {
 		h.sendError(w, reqID, 404, "no_channel", "no channel found for model: "+req.Model)
@@ -207,13 +304,14 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	defer metrics.DecActiveRequests()
 
 	reqID := generateRequestID()
-	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/responses", "target", "responses")
+	h.beginRequestLog(reqID, r)
 	body, err := h.readRequestBody(w, reqID, r)
 	if err != nil {
 		h.sendError(w, reqID, 400, "read_body_failed", err.Error())
 		return
 	}
 	body = stripUTF8BOM(body)
+	h.setRequestBodyLog(reqID, body, "")
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
 	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
@@ -229,6 +327,7 @@ func (h *ProxyHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		h.sendError(w, reqID, 400, "missing_model", "model is required")
 		return
 	}
+	h.setRequestBodyLog(reqID, body, req.Model)
 	candidates := h.channels.SelectChannelCandidates(req.Model)
 	if len(candidates) == 0 {
 		h.sendError(w, reqID, 404, "no_channel", "no channel found for model: "+req.Model)
@@ -242,13 +341,14 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	defer metrics.DecActiveRequests()
 
 	reqID := generateRequestID()
-	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1/messages", "target", "messages")
+	h.beginRequestLog(reqID, r)
 	body, err := h.readRequestBody(w, reqID, r)
 	if err != nil {
 		h.sendError(w, reqID, 400, "read_body_failed", err.Error())
 		return
 	}
 	body = stripUTF8BOM(body)
+	h.setRequestBodyLog(reqID, body, "")
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
 	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
@@ -264,6 +364,7 @@ func (h *ProxyHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 		h.sendError(w, reqID, 400, "missing_model", "model is required")
 		return
 	}
+	h.setRequestBodyLog(reqID, body, req.Model)
 	candidates := h.channels.SelectChannelCandidates(req.Model)
 	if len(candidates) == 0 {
 		h.sendError(w, reqID, 404, "no_channel", "no channel found for model: "+req.Model)
@@ -277,7 +378,7 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 	defer metrics.DecActiveRequests()
 
 	reqID := generateRequestID()
-	h.logger.Debug("incoming request", "request_id", reqID, "path", "/v1beta/models/*:generateContent", "target", "generateContent")
+	h.beginRequestLog(reqID, r)
 	model := extractGeminiModel(r.URL.Path)
 	if model == "" {
 		h.sendError(w, reqID, 400, "missing_model", "could not extract model from URL path")
@@ -289,6 +390,7 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	body = stripUTF8BOM(body)
+	h.setRequestBodyLog(reqID, body, model)
 	h.logger.LogRequestBody(reqID, body)
 	h.logger.LogClientInput(reqID, body)
 	deepLog := h.deepDebug.BeginRequest(reqID, r.Method, r.URL.Path)
@@ -322,15 +424,16 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 	if mi, ok := ch.ResolveModel(model); ok && mi.ID != "" {
 		upstreamModel = mi.ID
 	}
+	h.setRequestRouteLog(reqID, ch.Config.ID, "", upstreamModel)
 
-	h.logger.Debug("dispatch", "request_id", reqID, "target", target, "source", source, "native", source == target, "model", model)
+	h.logger.RequestDebug(reqID, "选择渠道", "channel_id", ch.Config.ID, "client_model", model, "upstream_model", upstreamModel, "target_api", target, "upstream_api", source, "native", source == target)
 	if source == target {
 		rawBody = replaceModelInBody(rawBody, model, upstreamModel)
-		h.logger.Debug("dispatch_replaceModelInBody", "channel", ch.Config.ID, "clientModel", model, "upstreamModel", upstreamModel)
+		h.logger.RequestDebug(reqID, "构造渠道请求", "channel_id", ch.Config.ID, "client_model", model, "upstream_model", upstreamModel)
 		return h.nativeForward(w, r, reqID, ch, source, rawBody, model, stream, deepLog)
 	}
 	chatReq, err := h.buildChatRequest(target, targetReq, upstreamModel, stream)
-	h.logger.Debug("dispatch_buildChatRequest", "channel", ch.Config.ID, "clientModel", model, "upstreamModel", upstreamModel)
+	h.logger.RequestDebug(reqID, "转换渠道请求", "channel_id", ch.Config.ID, "client_model", model, "upstream_model", upstreamModel)
 	if err != nil {
 		h.sendError(w, reqID, 400, "convert_failed", err.Error())
 		return nil
@@ -370,15 +473,15 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 			break
 		}
 		if time.Now().After(deadline) {
-			h.logger.Warn("failover_timeout", "request_id", reqID, "tried", tried)
+			h.logger.RequestWarn(reqID, "渠道故障转移超时", "tried", tried)
 			break
 		}
 		if !ch.IsHealthy() {
-			h.logger.Debug("failover_skip_unhealthy", "request_id", reqID, "channel", ch.Config.ID)
+			h.logger.RequestDebug(reqID, "跳过不健康渠道", "channel_id", ch.Config.ID)
 			continue
 		}
 
-		h.logger.Debug("failover_attempt", "request_id", reqID, "channel", ch.Config.ID, "attempt", tried+1)
+		h.logger.RequestDebug(reqID, "尝试渠道", "channel_id", ch.Config.ID, "attempt", tried+1)
 		failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog)
 
 		if failErr == nil {
@@ -391,8 +494,8 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 		ch.ReportChannelFailure()
 		lastErr = failErr
 		tried++
-		h.logger.Warn("failover_next", "request_id", reqID,
-			"failed_channel", ch.Config.ID, "reason", failErr.Message, "tried", tried)
+		h.logger.RequestWarn(reqID, "切换下一渠道",
+			"channel_id", ch.Config.ID, "reason", failErr.Message, "tried", tried)
 	}
 
 	// All channels failed
