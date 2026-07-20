@@ -614,6 +614,7 @@
                     if (r.ok) {
                         const d = await r.json();
                         this.configData = d.config || {};
+                        this.normalizeConfigForEditor();
                         this.configPath = d.path || '';
                         this.$nextTick(() => this.renderConfigForm());
                     } else {
@@ -621,6 +622,58 @@
                         this.showToast(d.error?.message || '读取配置失败');
                     }
                 } catch {}
+            },
+
+            normalizeConfigForEditor() {
+                const merge = (target, defaults) => {
+                    Object.entries(defaults).forEach(([key, value]) => {
+                        if (!(key in target)) target[key] = structuredClone(value);
+                    });
+                };
+                this.configData.server ||= {};
+                merge(this.configData.server, {
+                    host: '0.0.0.0', port: 8080, api_token: '', admin_token: '',
+                    admin_allowed_origins: [], max_request_body_size_mb: 64
+                });
+                this.configData.logging ||= {};
+                merge(this.configData.logging, {
+                    level: 'info', file: '', max_size_mb: 100, max_backups: 3,
+                    max_age_days: 30, compress: true, log_request_body: false, log_io: false
+                });
+                this.configData.database ||= { path: './data/proxy.db' };
+                this.configData.proxies ||= [];
+                this.configData.failover ||= {};
+                merge(this.configData.failover, {
+                    enabled: false, max_channel_attempts: 3, total_timeout_ms: 120000,
+                    consecutive_fail_threshold: 2, load_balance: 'priority'
+                });
+                this.configData.headers ||= {
+                    request: this.createHeaderPolicy(),
+                    response: this.createHeaderPolicy()
+                };
+                this.configData.headers.request ||= this.createHeaderPolicy();
+                this.configData.headers.response ||= this.createHeaderPolicy();
+                this.configData.channels ||= [];
+                this.configData.channels.forEach(channel => this.normalizeChannel(channel));
+            },
+
+            normalizeChannel(channel) {
+                const defaults = this.createDefaultChannel(0);
+                Object.entries(defaults).forEach(([key, value]) => {
+                    if (!(key in channel)) channel[key] = structuredClone(key === 'models' || key === 'keys' ? [] : value);
+                });
+                channel.models ||= [];
+                channel.keys ||= [];
+                channel.models.forEach(model => {
+                    const defaults = {
+                        id: '', display_name: '', context_window: 0, max_output_tokens: 0,
+                        supports_images: false, supports_reasoning: false, aliases: []
+                    };
+                    Object.entries(defaults).forEach(([key, value]) => {
+                        if (!(key in model)) model[key] = structuredClone(value);
+                    });
+                    if (!Array.isArray(model.aliases)) model.aliases = [];
+                });
             },
 
             renderConfigForm(extraOpenKey = '') {
@@ -639,6 +692,9 @@
 
             buildConfigNode(value, path) {
                 const wrap = document.createElement('div');
+                if (value && !Array.isArray(value) && this.isHeaderPolicyPath(path)) {
+                    return this.buildHeaderPolicyEditor(value, path);
+                }
                 if (Array.isArray(value)) {
                     if (path.length === 1 && path[0] === 'channels') {
                         return this.buildChannelsEditor(value, path);
@@ -702,7 +758,34 @@
                     meta.className = 'channel-editor-meta';
                     meta.textContent = (channel.id || '-') + ' · ' + (channel.enabled === false ? '已停用' : '已启用') +
                         ' · ' + ((channel.keys || []).length) + ' Keys · ' + ((channel.models || []).length) + ' Models';
-                    summary.append(title, meta);
+                    const actions = document.createElement('span');
+                    actions.className = 'channel-editor-actions';
+                    const clone = document.createElement('button');
+                    clone.type = 'button';
+                    clone.className = 'btn btn-ghost btn-sm';
+                    clone.textContent = '克隆';
+                    clone.addEventListener('click', event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const copy = structuredClone(channel);
+                        copy.id = this.uniqueChannelId((channel.id || 'channel') + '-copy', channels);
+                        copy.name = (channel.name || channel.id || 'Channel') + ' 副本';
+                        channels.splice(index + 1, 0, copy);
+                        this.renderConfigForm('channel:' + (index + 1));
+                    });
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-red btn-sm';
+                    remove.textContent = '删除';
+                    remove.addEventListener('click', event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (!confirm('确认删除 Channel「' + (channel.name || channel.id) + '」？')) return;
+                        channels.splice(index, 1);
+                        this.renderConfigForm();
+                    });
+                    actions.append(clone, remove);
+                    summary.append(title, meta, actions);
                     card.appendChild(summary);
                     card.appendChild(this.buildChannelFields(channel, path.concat(index)));
                     wrap.appendChild(card);
@@ -724,6 +807,13 @@
                 });
                 wrap.appendChild(add);
                 return wrap;
+            },
+
+            uniqueChannelId(base, channels) {
+                let id = base;
+                let suffix = 2;
+                while (channels.some(channel => channel.id === id)) id = base + '-' + suffix++;
+                return id;
             },
 
             createDefaultChannel(index) {
@@ -798,6 +888,13 @@
                         ? this.buildNamedConfigSection(key, value, path.concat(key))
                         : this.buildConfigField(key, value, path.concat(key)));
                 });
+                ['request_headers', 'response_headers'].forEach(key => {
+                    if (key in channel) return;
+                    body.appendChild(this.buildAddHeaderButton(
+                        key,
+                        () => { channel[key] = this.createHeaderPolicy(); this.renderConfigForm('channel:' + path[1]); }
+                    ));
+                });
                 return body;
             },
 
@@ -844,15 +941,218 @@
                 order.forEach(key => {
                     if (!(key in model)) return;
                     rendered.add(key);
-                    wrap.appendChild(this.buildConfigField(key, model[key], path.concat(key)));
+                    if (key === 'aliases') {
+                        wrap.appendChild(this.buildStringArrayEditor('aliases', model.aliases, path.concat(key)));
+                    } else {
+                        wrap.appendChild(this.buildConfigField(key, model[key], path.concat(key)));
+                    }
                 });
                 Object.keys(model).filter(key => !rendered.has(key)).forEach(key => {
                     const value = model[key];
-                    wrap.appendChild(value && typeof value === 'object'
+                    wrap.appendChild(key === 'aliases'
+                        ? this.buildStringArrayEditor('aliases', value || [], path.concat(key))
+                        : value && typeof value === 'object'
                         ? this.buildNamedConfigSection(key, value, path.concat(key))
                         : this.buildConfigField(key, value, path.concat(key)));
                 });
+                ['request_headers', 'response_headers'].forEach(key => {
+                    if (key in model) return;
+                    wrap.appendChild(this.buildAddHeaderButton(
+                        key,
+                        () => { model[key] = this.createHeaderPolicy(); this.renderConfigForm('model:' + path.slice(0, -1).join('.') + ':' + path[path.length - 1]); }
+                    ));
+                });
                 return wrap;
+            },
+
+            isHeaderPolicyPath(path) {
+                if (!path.length) return false;
+                const last = path[path.length - 1];
+                return last === 'request_headers' || last === 'response_headers' ||
+                    (path.length === 2 && path[0] === 'headers' && (last === 'request' || last === 'response'));
+            },
+
+            createHeaderPolicy() {
+                return {
+                    enabled: false,
+                    default_action: 'pass',
+                    key_case_policy: 'preserve_map_key',
+                    drop: [],
+                    pass: [],
+                    set: {},
+                    rename: {},
+                    append: {},
+                    prepend: {},
+                    copy: {},
+                    rules: []
+                };
+            },
+
+            buildAddHeaderButton(label, onClick) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'btn btn-ghost btn-sm add-header-button';
+                button.textContent = '＋ 添加 ' + label;
+                button.addEventListener('click', onClick);
+                return button;
+            },
+
+            buildHeaderPolicyEditor(policy, path) {
+                const wrap = document.createElement('div');
+                wrap.className = 'header-policy-editor';
+                const defaults = this.createHeaderPolicy();
+                Object.entries(defaults).forEach(([key, value]) => {
+                    if (!(key in policy)) policy[key] = structuredClone(value);
+                });
+                ['drop', 'pass', 'rules'].forEach(key => {
+                    if (!Array.isArray(policy[key])) policy[key] = [];
+                });
+                ['set', 'rename', 'append', 'prepend', 'copy'].forEach(key => {
+                    if (!policy[key] || Array.isArray(policy[key]) || typeof policy[key] !== 'object') policy[key] = {};
+                });
+                ['enabled', 'default_action', 'key_case_policy'].forEach(key => {
+                    wrap.appendChild(this.buildConfigField(key, policy[key], path.concat(key)));
+                });
+                wrap.appendChild(this.buildStringArrayEditor('drop', policy.drop, path.concat('drop')));
+                wrap.appendChild(this.buildStringArrayEditor('pass', policy.pass, path.concat('pass')));
+                ['set', 'rename', 'append', 'prepend', 'copy'].forEach(key => {
+                    wrap.appendChild(this.buildStringMapEditor(key, policy[key], path.concat(key)));
+                });
+                wrap.appendChild(this.buildHeaderRulesEditor(policy.rules, path.concat('rules')));
+                if (path[path.length - 1].endsWith('_headers')) {
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-red btn-sm remove-header-button';
+                    remove.textContent = '移除此 Header 配置';
+                    remove.addEventListener('click', () => {
+                        let parent = this.configData;
+                        for (let i = 0; i < path.length - 1; i++) parent = parent[path[i]];
+                        delete parent[path[path.length - 1]];
+                        this.renderConfigForm();
+                    });
+                    wrap.appendChild(remove);
+                }
+                return wrap;
+            },
+
+            buildStringArrayEditor(label, values, path) {
+                const section = document.createElement('div');
+                section.className = 'array-editor';
+                const heading = document.createElement('div');
+                heading.className = 'array-editor-heading';
+                heading.textContent = label;
+                section.appendChild(heading);
+                const list = document.createElement('div');
+                list.className = 'array-editor-list';
+                values.forEach((value, index) => {
+                    const row = document.createElement('div');
+                    row.className = 'array-editor-row';
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.value = value;
+                    input.addEventListener('input', () => { values[index] = input.value; });
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-red btn-sm';
+                    remove.textContent = '删除';
+                    remove.addEventListener('click', () => { values.splice(index, 1); this.renderConfigForm(); });
+                    row.append(input, remove);
+                    list.appendChild(row);
+                });
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'btn btn-ghost btn-sm';
+                add.textContent = '＋ 添加';
+                add.addEventListener('click', () => { values.push(''); this.renderConfigForm(); });
+                section.append(list, add);
+                return section;
+            },
+
+            buildStringMapEditor(label, values, path) {
+                const section = document.createElement('div');
+                section.className = 'map-editor';
+                const heading = document.createElement('div');
+                heading.className = 'array-editor-heading';
+                heading.textContent = label;
+                section.appendChild(heading);
+                const list = document.createElement('div');
+                list.className = 'array-editor-list';
+                Object.entries(values).forEach(([key, value]) => {
+                    let entryKey = key;
+                    const row = document.createElement('div');
+                    row.className = 'map-editor-row';
+                    const keyInput = document.createElement('input');
+                    keyInput.type = 'text';
+                    keyInput.value = key;
+                    const valueInput = document.createElement('input');
+                    valueInput.type = 'text';
+                    valueInput.value = value;
+                    keyInput.addEventListener('change', () => {
+                        const nextKey = keyInput.value.trim();
+                        if (!nextKey || nextKey === entryKey) return;
+                        delete values[entryKey];
+                        values[nextKey] = valueInput.value;
+                        entryKey = nextKey;
+                    });
+                    valueInput.addEventListener('input', () => { values[keyInput.value] = valueInput.value; });
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-red btn-sm';
+                    remove.textContent = '删除';
+                    remove.addEventListener('click', () => { delete values[entryKey]; this.renderConfigForm(); });
+                    row.append(keyInput, valueInput, remove);
+                    list.appendChild(row);
+                });
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'btn btn-ghost btn-sm';
+                add.textContent = '＋ 添加映射';
+                add.addEventListener('click', () => {
+                    let key = 'X-Header';
+                    let i = 2;
+                    while (key in values) key = 'X-Header-' + i++;
+                    values[key] = '';
+                    this.renderConfigForm();
+                });
+                section.append(list, add);
+                return section;
+            },
+
+            buildHeaderRulesEditor(rules, path) {
+                const section = document.createElement('div');
+                section.className = 'rules-editor';
+                const heading = document.createElement('div');
+                heading.className = 'array-editor-heading';
+                heading.textContent = 'rules（完整规则）';
+                section.appendChild(heading);
+                rules.forEach((rule, index) => {
+                    const card = document.createElement('fieldset');
+                    card.className = 'config-group';
+                    const legend = document.createElement('legend');
+                    legend.textContent = 'Rule ' + (index + 1);
+                    card.appendChild(legend);
+                    ['name', 'phase', 'match_type', 'pattern', 'action', 'value', 'target'].forEach(key => {
+                        if (!(key in rule)) rule[key] = '';
+                        card.appendChild(this.buildConfigField(key, rule[key], path.concat(index, key)));
+                    });
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-red btn-sm';
+                    remove.textContent = '删除 Rule';
+                    remove.addEventListener('click', () => { rules.splice(index, 1); this.renderConfigForm(); });
+                    card.appendChild(remove);
+                    section.appendChild(card);
+                });
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'btn btn-ghost btn-sm';
+                add.textContent = '＋ 添加 Rule';
+                add.addEventListener('click', () => {
+                    rules.push({ name: '', phase: 'request', match_type: 'exact', pattern: '', action: 'pass', value: '', target: '' });
+                    this.renderConfigForm();
+                });
+                section.appendChild(add);
+                return section;
             },
 
             buildKeysEditor(keys, path) {
