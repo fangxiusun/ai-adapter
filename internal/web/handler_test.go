@@ -120,3 +120,14 @@ func TestStaticHandlerServesCleanIndexHTML(t *testing.T) {
 		t.Fatal("index.html does not contain a valid script tag sequence for chart.js and alpine.js")
 	}
 }
+
+func TestProxyURLPasswordMaskAndRestore(t *testing.T) {
+	original := "socks5://user:secret@127.0.0.1:1080"
+	masked := maskProxyURL(original)
+	if masked != "socks5://user:***@127.0.0.1:1080" {
+		t.Fatalf("masked URL = %q", masked)
+	}
+	if restored := restoreProxyURLPassword(masked, original); restored != original {
+		t.Fatalf("restored URL = %q, want %q", restored, original)
+	}
+}

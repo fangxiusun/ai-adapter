@@ -429,7 +429,7 @@ func maskConfigSecrets(value interface{}) {
 		for _, item := range proxies {
 			if proxy, ok := item.(map[string]interface{}); ok {
 				if s, ok := proxy["url"].(string); ok && s != "" {
-					proxy["url"] = secretPlaceholder
+					proxy["url"] = maskProxyURL(s)
 				}
 			}
 		}
@@ -468,6 +468,14 @@ func restoreConfigSecrets(current, old interface{}) {
 			currentMap[key] = oldValue
 			continue
 		}
+		if key == "url" {
+			currentURL, currentOK := currentValue.(string)
+			oldURL, oldOK := oldValue.(string)
+			if currentOK && oldOK {
+				currentMap[key] = restoreProxyURLPassword(currentURL, oldURL)
+				continue
+			}
+		}
 		switch typed := currentValue.(type) {
 		case map[string]interface{}:
 			restoreConfigSecrets(typed, oldValue)
@@ -485,6 +493,27 @@ func restoreConfigSecrets(current, old interface{}) {
 	}
 }
 
+func restoreProxyURLPassword(currentURL, oldURL string) string {
+	current, err := url.Parse(currentURL)
+	if err != nil || current.User == nil {
+		return currentURL
+	}
+	password, hasPassword := current.User.Password()
+	if !hasPassword || password != "***" {
+		return currentURL
+	}
+	old, err := url.Parse(oldURL)
+	if err != nil || old.User == nil {
+		return currentURL
+	}
+	oldPassword, oldHasPassword := old.User.Password()
+	if !oldHasPassword {
+		return currentURL
+	}
+	current.User = url.UserPassword(current.User.Username(), oldPassword)
+	return current.String()
+}
+
 // maskProxyURL masks the password in proxy URLs like socks5://user:pass@host:port
 func maskProxyURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
@@ -494,7 +523,7 @@ func maskProxyURL(rawURL string) string {
 	if u.User != nil {
 		u.User = url.UserPassword(u.User.Username(), "***")
 	}
-	return u.String()
+	return strings.Replace(u.String(), "%2A%2A%2A", "***", 1)
 }
 
 func (h *WebHandler) handleValidKeys(w http.ResponseWriter, r *http.Request) {

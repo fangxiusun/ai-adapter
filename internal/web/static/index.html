@@ -623,10 +623,18 @@
                 } catch {}
             },
 
-            renderConfigForm() {
+            renderConfigForm(extraOpenKey = '') {
                 const root = document.getElementById('configForm');
                 if (!root) return;
+                const openKeys = new Set(
+                    Array.from(root.querySelectorAll('details[open][data-state-key]'))
+                        .map(item => item.dataset.stateKey)
+                );
+                if (extraOpenKey) openKeys.add(extraOpenKey);
                 root.replaceChildren(this.buildConfigNode(this.configData, []));
+                root.querySelectorAll('details[data-state-key]').forEach(item => {
+                    item.open = openKeys.has(item.dataset.stateKey);
+                });
             },
 
             buildConfigNode(value, path) {
@@ -684,6 +692,7 @@
                 channels.forEach((channel, index) => {
                     const card = document.createElement('details');
                     card.className = 'channel-editor';
+                    card.dataset.stateKey = 'channel:' + index;
                     const summary = document.createElement('summary');
                     summary.className = 'channel-editor-summary';
                     const title = document.createElement('span');
@@ -698,8 +707,63 @@
                     card.appendChild(this.buildChannelFields(channel, path.concat(index)));
                     wrap.appendChild(card);
                 });
-                if (!channels.length) wrap.textContent = '尚未配置 Channel';
+                if (!channels.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'text-muted text-center';
+                    empty.textContent = '尚未配置 Channel';
+                    wrap.appendChild(empty);
+                }
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'btn btn-primary add-channel-button';
+                add.textContent = '＋ 新建 Channel';
+                add.addEventListener('click', () => {
+                    const index = channels.length;
+                    channels.push(this.createDefaultChannel(index));
+                    this.renderConfigForm('channel:' + index);
+                });
+                wrap.appendChild(add);
                 return wrap;
+            },
+
+            createDefaultChannel(index) {
+                return {
+                    id: 'channel-' + (index + 1),
+                    name: '新渠道 ' + (index + 1),
+                    enabled: true,
+                    proxy_id: '',
+                    priority: 100,
+                    chat_url: '',
+                    responses_url: '',
+                    messages_url: '',
+                    generate_content_url: '',
+                    models: [{
+                        id: 'model-id',
+                        display_name: '新模型',
+                        context_window: 128000,
+                        max_output_tokens: 8192,
+                        supports_images: false,
+                        supports_reasoning: false
+                    }],
+                    default_model: 'model-id',
+                    keys: [{ value: '', name: 'key-1' }],
+                    key_strategy: 'round-robin',
+                    max_retries: 2,
+                    retry_delay_ms: 500,
+                    request_timeout_ms: 60000,
+                    fanout: { enabled: false, count: 2, wait_all: false },
+                    thinking: { default_enabled: false, force_high_effort: false },
+                    web_search: { enabled: false },
+                    retry: {
+                        retry_delay_429_ms: 500,
+                        max_rotation_rounds: 3,
+                        max_total_wait_ms: 30000,
+                        consec_error_threshold: 3,
+                        pause_multiplier_sec: 30,
+                        pause_max_sec: 600
+                    },
+                    key_stats_sync_sec: 60
+                };
             },
 
             buildChannelFields(channel, path) {
@@ -740,6 +804,7 @@
             buildNamedConfigSection(name, value, path) {
                 const section = document.createElement('details');
                 section.className = 'config-section channel-subsection';
+                section.dataset.stateKey = 'section:' + path.join('.');
                 const summary = document.createElement('summary');
                 summary.textContent = name;
                 section.append(summary, this.buildConfigNode(value, path));
@@ -749,6 +814,7 @@
             buildModelsEditor(models, path) {
                 const section = document.createElement('details');
                 section.className = 'config-section channel-subsection';
+                section.dataset.stateKey = 'section:' + path.join('.');
                 const summary = document.createElement('summary');
                 summary.textContent = 'models（' + models.length + '）';
                 section.appendChild(summary);
@@ -757,13 +823,36 @@
                 models.forEach((model, index) => {
                     const modelCard = document.createElement('details');
                     modelCard.className = 'model-editor';
+                    modelCard.dataset.stateKey = 'model:' + path.join('.') + ':' + index;
                     const modelSummary = document.createElement('summary');
                     modelSummary.textContent = (index + 1) + '. ' + (model.display_name || model.id || '未命名模型');
-                    modelCard.append(modelSummary, this.buildConfigNode(model, path.concat(index)));
+                    modelCard.append(modelSummary, this.buildModelFields(model, path.concat(index)));
                     list.appendChild(modelCard);
                 });
                 section.appendChild(list);
                 return section;
+            },
+
+            buildModelFields(model, path) {
+                const wrap = document.createElement('div');
+                wrap.className = 'config-object';
+                const order = [
+                    'id', 'display_name', 'context_window', 'max_output_tokens',
+                    'supports_images', 'supports_reasoning'
+                ];
+                const rendered = new Set();
+                order.forEach(key => {
+                    if (!(key in model)) return;
+                    rendered.add(key);
+                    wrap.appendChild(this.buildConfigField(key, model[key], path.concat(key)));
+                });
+                Object.keys(model).filter(key => !rendered.has(key)).forEach(key => {
+                    const value = model[key];
+                    wrap.appendChild(value && typeof value === 'object'
+                        ? this.buildNamedConfigSection(key, value, path.concat(key))
+                        : this.buildConfigField(key, value, path.concat(key)));
+                });
+                return wrap;
             },
 
             buildKeysEditor(keys, path) {

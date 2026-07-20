@@ -484,6 +484,7 @@ h3 {
 .btn:disabled { opacity: 0.6; cursor: wait; }
 
 .channel-editor-list { display: grid; gap: 14px; padding-top: 12px; }
+.add-channel-button { justify-self: start; margin-top: 2px; }
 .channel-editor {
     border: 1px solid var(--border);
     border-radius: 10px;
