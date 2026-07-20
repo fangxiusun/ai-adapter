@@ -632,6 +632,9 @@
             buildConfigNode(value, path) {
                 const wrap = document.createElement('div');
                 if (Array.isArray(value)) {
+                    if (path.length === 1 && path[0] === 'channels') {
+                        return this.buildChannelsEditor(value, path);
+                    }
                     if (value.every(item => item === null || typeof item !== 'object')) {
                         const area = document.createElement('textarea');
                         area.className = 'config-list-input';
@@ -673,6 +676,134 @@
                     return wrap;
                 }
                 return wrap;
+            },
+
+            buildChannelsEditor(channels, path) {
+                const wrap = document.createElement('div');
+                wrap.className = 'channel-editor-list';
+                channels.forEach((channel, index) => {
+                    const card = document.createElement('details');
+                    card.className = 'channel-editor';
+                    const summary = document.createElement('summary');
+                    summary.className = 'channel-editor-summary';
+                    const title = document.createElement('span');
+                    title.className = 'channel-editor-title';
+                    title.textContent = (index + 1) + '. ' + (channel.name || channel.id || '未命名渠道');
+                    const meta = document.createElement('span');
+                    meta.className = 'channel-editor-meta';
+                    meta.textContent = (channel.id || '-') + ' · ' + (channel.enabled === false ? '已停用' : '已启用') +
+                        ' · ' + ((channel.keys || []).length) + ' Keys · ' + ((channel.models || []).length) + ' Models';
+                    summary.append(title, meta);
+                    card.appendChild(summary);
+                    card.appendChild(this.buildChannelFields(channel, path.concat(index)));
+                    wrap.appendChild(card);
+                });
+                if (!channels.length) wrap.textContent = '尚未配置 Channel';
+                return wrap;
+            },
+
+            buildChannelFields(channel, path) {
+                const body = document.createElement('div');
+                body.className = 'channel-editor-body';
+                const order = [
+                    'id', 'name', 'enabled', 'proxy_id', 'priority',
+                    'chat_url', 'responses_url', 'messages_url', 'generate_content_url',
+                    'models', 'default_model', 'keys', 'key_strategy',
+                    'max_retries', 'retry_delay_ms', 'request_timeout_ms',
+                    'fanout', 'thinking', 'web_search', 'retry', 'key_stats_sync_sec',
+                    'request_headers', 'response_headers'
+                ];
+                const rendered = new Set();
+                order.forEach(key => {
+                    if (!(key in channel)) return;
+                    rendered.add(key);
+                    const value = channel[key];
+                    if (key === 'keys') {
+                        body.appendChild(this.buildKeysEditor(value || [], path.concat(key)));
+                    } else if (key === 'models') {
+                        body.appendChild(this.buildModelsEditor(value || [], path.concat(key)));
+                    } else if (value && typeof value === 'object') {
+                        body.appendChild(this.buildNamedConfigSection(key, value, path.concat(key)));
+                    } else {
+                        body.appendChild(this.buildConfigField(key, value, path.concat(key)));
+                    }
+                });
+                Object.keys(channel).filter(key => !rendered.has(key)).forEach(key => {
+                    const value = channel[key];
+                    body.appendChild(value && typeof value === 'object'
+                        ? this.buildNamedConfigSection(key, value, path.concat(key))
+                        : this.buildConfigField(key, value, path.concat(key)));
+                });
+                return body;
+            },
+
+            buildNamedConfigSection(name, value, path) {
+                const section = document.createElement('details');
+                section.className = 'config-section channel-subsection';
+                const summary = document.createElement('summary');
+                summary.textContent = name;
+                section.append(summary, this.buildConfigNode(value, path));
+                return section;
+            },
+
+            buildModelsEditor(models, path) {
+                const section = document.createElement('details');
+                section.className = 'config-section channel-subsection';
+                const summary = document.createElement('summary');
+                summary.textContent = 'models（' + models.length + '）';
+                section.appendChild(summary);
+                const list = document.createElement('div');
+                list.className = 'model-editor-list';
+                models.forEach((model, index) => {
+                    const modelCard = document.createElement('details');
+                    modelCard.className = 'model-editor';
+                    const modelSummary = document.createElement('summary');
+                    modelSummary.textContent = (index + 1) + '. ' + (model.display_name || model.id || '未命名模型');
+                    modelCard.append(modelSummary, this.buildConfigNode(model, path.concat(index)));
+                    list.appendChild(modelCard);
+                });
+                section.appendChild(list);
+                return section;
+            },
+
+            buildKeysEditor(keys, path) {
+                const section = document.createElement('details');
+                section.className = 'config-section channel-subsection keys-editor-section';
+                section.open = true;
+                const summary = document.createElement('summary');
+                summary.textContent = 'keys（' + keys.length + '）';
+                section.appendChild(summary);
+                const list = document.createElement('div');
+                list.className = 'key-editor-list';
+                keys.forEach((key, index) => {
+                    const row = document.createElement('div');
+                    row.className = 'key-editor-row';
+                    const id = document.createElement('span');
+                    id.className = 'key-auto-id';
+                    id.textContent = 'Key ' + (index + 1);
+                    const valueField = this.buildConfigField('value', key.value ?? '', path.concat(index, 'value'));
+                    const nameField = this.buildConfigField('name', key.name ?? ('key-' + (index + 1)), path.concat(index, 'name'));
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-red btn-sm';
+                    remove.textContent = '删除';
+                    remove.addEventListener('click', () => {
+                        keys.splice(index, 1);
+                        this.renderConfigForm();
+                    });
+                    row.append(id, valueField, nameField, remove);
+                    list.appendChild(row);
+                });
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'btn btn-ghost btn-sm add-key-button';
+                add.textContent = '＋ 添加 Key';
+                add.addEventListener('click', () => {
+                    keys.push({ value: '', name: 'key-' + (keys.length + 1) });
+                    this.renderConfigForm();
+                });
+                section.append(list, add);
+                return section;
             },
 
             buildConfigField(label, value, path) {
