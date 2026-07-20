@@ -727,6 +727,7 @@
                         if (child && typeof child === 'object') {
                             const section = document.createElement('details');
                             section.className = 'config-section';
+                            section.dataset.stateKey = 'config:' + path.concat(key).join('.');
                             section.open = path.length < 1;
                             const summary = document.createElement('summary');
                             summary.textContent = key;
