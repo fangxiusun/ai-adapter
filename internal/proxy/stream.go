@@ -17,8 +17,6 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/translate"
 )
 
-
-
 // fanoutStreamForward sends the stream request to multiple keys concurrently
 // and forwards the first successful response to the client.
 func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Request, reqID string,
@@ -184,7 +182,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
-				"request_body", string(sourceBody),
+				// "request_body", string(sourceBody),
 				"upstream_body", string(errBodyBytes),
 			)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
@@ -194,9 +192,9 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
 		capture := newStreamUsageCapture(resp.Body)
 		flusher := func() {
-		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
-			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
-		}
+			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -318,7 +316,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
-				"request_body", string(sourceBody),
+				// "request_body", string(sourceBody),
 				"upstream_body", string(errBodyBytes),
 			)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
@@ -336,9 +334,9 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
 		flusher := func() {
-		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
-			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
-		}
+			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -535,5 +533,3 @@ func (h *ProxyHandler) emitGeminiStreamResponse(w io.Writer, chatResp *translate
 		flusher()
 	}
 }
-
-

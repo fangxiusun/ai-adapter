@@ -173,7 +173,7 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
-				"request_body", string(body),
+				// "request_body", string(body),
 				"upstream_body", string(errBodyBytes),
 			)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
@@ -324,7 +324,7 @@ func (h *ProxyHandler) convertedNonStreamForward(w http.ResponseWriter, r *http.
 				"model", model,
 				"status", resp.StatusCode,
 				"url", url,
-				"request_body", string(sourceBody),
+				// "request_body", string(sourceBody),
 				"upstream_body", string(errBodyBytes),
 			)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
