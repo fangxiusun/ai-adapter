@@ -55,9 +55,10 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	ch.ReportSuccess(result.Key)
 
 	deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
-	deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
-
-	capture := newStreamUsageCapture(resp.Body)
+	upstreamDebug := deepLog.NewUpstreamStreamCapture(resp.StatusCode)
+	defer upstreamDebug.Close()
+	upstreamReader := io.TeeReader(resp.Body, upstreamDebug)
+	capture := newStreamUsageCapture(upstreamReader)
 	flusher := func() {
 		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
 			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
@@ -72,17 +73,20 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Connection", "keep-alive")
 	deepLog.LogClientResponseHeader(200, w.Header())
 	w.WriteHeader(200)
+	clientDebug := deepLog.NewClientStreamCapture(200)
+	defer clientDebug.Close()
+	clientWriter := io.MultiWriter(w, clientDebug)
 
 	switch target {
 	case config.InterfaceChat:
-		io.Copy(w, capture)
+		io.Copy(clientWriter, capture)
 	case config.InterfaceResponses:
 		respReq, _ := targetReq.(*translate.ResponsesRequest)
-		translate.PipeChatStreamToResponses(r.Context(), capture, w, respReq, translate.TranslateOpts{ExtractInlineThink: true})
+		translate.PipeChatStreamToResponses(r.Context(), capture, clientWriter, respReq, translate.TranslateOpts{ExtractInlineThink: true})
 	case config.InterfaceMessages:
-		translate.PipeChatStreamToClaude(r.Context(), capture, w, chatReq, flusher)
+		translate.PipeChatStreamToClaude(r.Context(), capture, clientWriter, chatReq, flusher)
 	case config.InterfaceGenerateContent:
-		translate.PipeChatStreamToGemini(r.Context(), capture, w, chatReq, flusher)
+		translate.PipeChatStreamToGemini(r.Context(), capture, clientWriter, chatReq, flusher)
 	}
 
 	pt, ct, tt, usageJSON := capture.Usage()
@@ -190,8 +194,9 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		}
 
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
-		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
-		capture := newStreamUsageCapture(resp.Body)
+		upstreamDebug := deepLog.NewUpstreamStreamCapture(resp.StatusCode)
+		upstreamReader := io.TeeReader(resp.Body, upstreamDebug)
+		capture := newStreamUsageCapture(upstreamReader)
 		flusher := func() {
 			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
 				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
@@ -205,17 +210,21 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		w.Header().Set("Connection", "keep-alive")
 		deepLog.LogClientResponseHeader(200, w.Header())
 		w.WriteHeader(200)
+		clientDebug := deepLog.NewClientStreamCapture(200)
+		clientWriter := io.MultiWriter(w, clientDebug)
 		switch target {
 		case config.InterfaceChat:
-			io.Copy(w, capture)
+			io.Copy(clientWriter, capture)
 		case config.InterfaceResponses:
 			respReq, _ := targetReq.(*translate.ResponsesRequest)
-			translate.PipeChatStreamToResponses(r.Context(), capture, w, respReq, translate.TranslateOpts{ExtractInlineThink: true})
+			translate.PipeChatStreamToResponses(r.Context(), capture, clientWriter, respReq, translate.TranslateOpts{ExtractInlineThink: true})
 		case config.InterfaceMessages:
-			translate.PipeChatStreamToClaude(r.Context(), capture, w, chatReq, flusher)
+			translate.PipeChatStreamToClaude(r.Context(), capture, clientWriter, chatReq, flusher)
 		case config.InterfaceGenerateContent:
-			translate.PipeChatStreamToGemini(r.Context(), capture, w, chatReq, flusher)
+			translate.PipeChatStreamToGemini(r.Context(), capture, clientWriter, chatReq, flusher)
 		}
+		upstreamDebug.Close()
+		clientDebug.Close()
 		resp.Body.Close()
 		pt, ct, tt, usageJSON := capture.Usage()
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
@@ -319,7 +328,10 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 
-		chatResp, err := h.accumulateStreamToChat(r.Context(), source, resp.Body, chatReq)
+		upstreamDebug := deepLog.NewUpstreamStreamCapture(resp.StatusCode)
+		upstreamReader := io.TeeReader(resp.Body, upstreamDebug)
+		chatResp, err := h.accumulateStreamToChat(r.Context(), source, upstreamReader, chatReq)
+		upstreamDebug.Close()
 		resp.Body.Close()
 		if err != nil {
 			ch.ReportStreamError(key.Value)
@@ -329,7 +341,6 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
 		ch.ReportSuccess(key.Value)
 		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
-		deepLog.LogUpstreamStreamResponse(resp.StatusCode, nil)
 		flusher := func() {
 			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
 				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
@@ -343,7 +354,10 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		w.Header().Set("Connection", "keep-alive")
 		deepLog.LogClientResponseHeader(200, w.Header())
 		w.WriteHeader(200)
-		h.emitStreamResponse(w, target, chatResp, chatReq, targetReq, flusher)
+		clientDebug := deepLog.NewClientStreamCapture(200)
+		clientWriter := io.MultiWriter(w, clientDebug)
+		h.emitStreamResponse(clientWriter, target, chatResp, chatReq, targetReq, flusher)
+		clientDebug.Close()
 		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
 		h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		return nil

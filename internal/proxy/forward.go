@@ -179,15 +179,23 @@ func (h *ProxyHandler) nativeForward(w http.ResponseWriter, r *http.Request, req
 		var usageJSON string
 
 		if stream {
-			capture := newStreamUsageCapture(resp.Body)
+			deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
+			upstreamDebug := deepLog.NewUpstreamStreamCapture(resp.StatusCode)
+			upstreamReader := io.TeeReader(resp.Body, upstreamDebug)
+			capture := newStreamUsageCapture(upstreamReader)
 			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
 				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
 			}
 			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-transform")
 			w.Header().Set("Connection", "keep-alive")
+			deepLog.LogClientResponseHeader(resp.StatusCode, w.Header())
 			w.WriteHeader(200)
-			io.Copy(w, capture)
+			clientDebug := deepLog.NewClientStreamCapture(resp.StatusCode)
+			clientWriter := io.MultiWriter(w, clientDebug)
+			io.Copy(clientWriter, capture)
+			upstreamDebug.Close()
+			clientDebug.Close()
 			pt, ct, tt, usageJSON = capture.Usage()
 		} else {
 			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBodyBytes()))

@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const maxStreamCaptureBytes int64 = 32 * 1024 * 1024
+
 // DeepDebugLogger creates per-request log files when deep debug mode is enabled.
 type DeepDebugLogger struct {
 	enabled bool
@@ -39,6 +41,96 @@ type RequestLog struct {
 	dir                 string
 	mu                  sync.Mutex
 	upstreamReqBodyOnce sync.Once
+}
+
+// StreamCapture incrementally appends a streaming response to a deep-debug file.
+// It intentionally limits the recorded bytes while allowing the live stream to continue.
+type StreamCapture struct {
+	requestLog *RequestLog
+	filename   string
+	statusCode int
+	written    int64
+	truncated  bool
+	closed     bool
+	mu         sync.Mutex
+}
+
+// NewUpstreamStreamCapture creates a capture for the raw upstream stream.
+func (rl *RequestLog) NewUpstreamStreamCapture(statusCode int) *StreamCapture {
+	return rl.newStreamCapture("upstream.res.body.log", statusCode)
+}
+
+// NewClientStreamCapture creates a capture for the stream sent to the client.
+func (rl *RequestLog) NewClientStreamCapture(statusCode int) *StreamCapture {
+	return rl.newStreamCapture("client.res.body.log", statusCode)
+}
+
+func (rl *RequestLog) newStreamCapture(filename string, statusCode int) *StreamCapture {
+	if rl == nil {
+		return nil
+	}
+	capture := &StreamCapture{requestLog: rl, filename: filename, statusCode: statusCode}
+	header := fmt.Sprintf(
+		"Timestamp:  %s\nStatusCode: %d %s\nCaptureLimit: %d bytes\n\n--- Raw Stream Data ---\n",
+		time.Now().Format("2006-01-02 15:04:05.000"),
+		statusCode,
+		statusText(statusCode),
+		maxStreamCaptureBytes,
+	)
+	rl.mu.Lock()
+	rl.writeFileOverwrite(filename, header)
+	rl.mu.Unlock()
+	return capture
+}
+
+// Write implements io.Writer and always reports the original length so logging
+// never interrupts the proxied stream.
+func (c *StreamCapture) Write(p []byte) (int, error) {
+	if c == nil {
+		return len(p), nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return len(p), nil
+	}
+	remaining := maxStreamCaptureBytes - c.written
+	if remaining <= 0 {
+		c.truncated = true
+		return len(p), nil
+	}
+	toWrite := p
+	if int64(len(toWrite)) > remaining {
+		toWrite = toWrite[:remaining]
+		c.truncated = true
+	}
+	c.requestLog.mu.Lock()
+	c.requestLog.appendBytes(c.filename, toWrite)
+	c.requestLog.mu.Unlock()
+	c.written += int64(len(toWrite))
+	return len(p), nil
+}
+
+// Close appends stream capture metadata and is safe to call repeatedly.
+func (c *StreamCapture) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	footer := fmt.Sprintf(
+		"\n--- End Stream Data ---\nCapturedLength: %d bytes\nTruncated: %t\n",
+		c.written,
+		c.truncated,
+	)
+	c.requestLog.mu.Lock()
+	c.requestLog.writeFile(c.filename, footer)
+	c.requestLog.mu.Unlock()
+	return nil
 }
 
 // BeginRequest creates a new per-request log directory and files. Returns nil if deep debug is disabled.
@@ -246,6 +338,19 @@ func (rl *RequestLog) writeFile(filename, content string) {
 	}
 	defer f.Close()
 	f.WriteString(content)
+}
+
+func (rl *RequestLog) appendBytes(filename string, content []byte) {
+	filePath := filepath.Join(rl.dir, filename)
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[deep-debug] failed to write %s: %v\n", filePath, err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(content); err != nil {
+		fmt.Fprintf(os.Stderr, "[deep-debug] failed to write %s: %v\n", filePath, err)
+	}
 }
 
 // formatHeaders formats http.Header for display.
