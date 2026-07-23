@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +14,147 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
 	"github.com/fangxiusun/ai-adapter/internal/log"
 )
+
+func TestUpstreamBadRequestIsMappedToServiceUnavailable(t *testing.T) {
+	const upstreamReason = `{"error":{"message":"real upstream reason"}}`
+
+	tests := []struct {
+		name     string
+		source   config.InterfaceType
+		target   config.InterfaceType
+		endpoint string
+		body     string
+	}{
+		{
+			name:     "native non-stream",
+			source:   config.InterfaceChat,
+			target:   config.InterfaceChat,
+			endpoint: "/v1/chat/completions",
+			body:     `{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name:     "native stream",
+			source:   config.InterfaceChat,
+			target:   config.InterfaceChat,
+			endpoint: "/v1/chat/completions",
+			body:     `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+		},
+		{
+			name:     "converted non-stream",
+			source:   config.InterfaceChat,
+			target:   config.InterfaceResponses,
+			endpoint: "/v1/responses",
+			body:     `{"model":"test-model","input":"hi"}`,
+		},
+		{
+			name:     "converted stream from chat",
+			source:   config.InterfaceChat,
+			target:   config.InterfaceResponses,
+			endpoint: "/v1/responses",
+			body:     `{"model":"test-model","input":"hi","stream":true}`,
+		},
+		{
+			name:     "converted stream chain",
+			source:   config.InterfaceResponses,
+			target:   config.InterfaceChat,
+			endpoint: "/v1/chat/completions",
+			body:     `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(upstreamReason))
+			}))
+			defer upstream.Close()
+
+			logPath := filepath.Join(t.TempDir(), "proxy.log")
+			logger := log.New("warn", logPath, false, false)
+
+			channelConfig := config.ChannelConfig{
+				ID:               "test-channel",
+				Name:             "test-channel",
+				Enabled:          true,
+				DefaultModel:     "test-model",
+				Models:           []config.ModelConfig{{ID: "test-model", DisplayName: "test-model"}},
+				Keys:             []config.KeyConfig{{Value: "sk-test", Name: "key-1"}},
+				KeyStrategy:      "round-robin",
+				RequestTimeoutMs: 1000,
+				Retry: config.RetryConfig{
+					RetryDelay429Ms:      1,
+					MaxRotationRounds:    1,
+					MaxTotalWaitMs:       1000,
+					ConsecErrorThreshold: 1,
+					PauseMultiplierSec:   1,
+					PauseMaxSec:          1,
+				},
+			}
+			switch tt.source {
+			case config.InterfaceChat:
+				channelConfig.ChatURL = upstream.URL
+			case config.InterfaceResponses:
+				channelConfig.ResponsesURL = upstream.URL
+			default:
+				t.Fatalf("unsupported test source: %s", tt.source)
+			}
+
+			cfg := &config.Config{
+				Server: config.ServerConfig{MaxRequestBodySizeMB: 1},
+				Failover: config.FailoverConfig{
+					Enabled:                  false,
+					MaxChannelAttempts:       1,
+					TotalTimeoutMs:           1000,
+					ConsecutiveFailThreshold: 1,
+				},
+				Channels: []config.ChannelConfig{channelConfig},
+			}
+			cm := channel.NewChannelManager(cfg.Channels, nil, logger, nil, "priority")
+			handler := NewProxyHandler(cm, nil, logger, cfg, debuglog.New(false), nil, nil, nil)
+
+			req := httptest.NewRequest(http.MethodPost, tt.endpoint, strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			switch tt.target {
+			case config.InterfaceChat:
+				handler.HandleChat(rec, req)
+			case config.InterfaceResponses:
+				handler.HandleResponses(rec, req)
+			default:
+				t.Fatalf("unsupported test target: %s", tt.target)
+			}
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), upstreamBadRequestErrorCode) {
+				t.Fatalf("response does not contain error code %q: %s", upstreamBadRequestErrorCode, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "real upstream reason") {
+				t.Fatalf("response does not preserve upstream reason: %s", rec.Body.String())
+			}
+
+			logger.Close()
+			logBytes, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read log: %v", err)
+			}
+			logText := string(logBytes)
+			for _, expected := range []string{
+				"upstream_status=400",
+				"client_status=503",
+				"error_reason=",
+				"real upstream reason",
+				"error_code=upstream_bad_request",
+			} {
+				if !strings.Contains(logText, expected) {
+					t.Errorf("log does not contain %q: %s", expected, logText)
+				}
+			}
+		})
+	}
+}
 
 func TestHandleChatReturnsErrorWhenSingleChannelRequestFails(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

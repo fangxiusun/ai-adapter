@@ -10,8 +10,12 @@ import (
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
+	"github.com/fangxiusun/ai-adapter/internal/debuglog"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
+	"github.com/fangxiusun/ai-adapter/internal/util"
 )
+
+const upstreamBadRequestErrorCode = "upstream_bad_request"
 
 // sendError writes a JSON error response to the client and logs the error.
 func (h *ProxyHandler) sendError(w http.ResponseWriter, reqID string, status int, code, message string) {
@@ -31,6 +35,74 @@ func (h *ProxyHandler) sendError(w http.ResponseWriter, reqID string, status int
 		"error": map[string]interface{}{"type": "error", "code": code, "message": message, "status": status},
 	})
 	h.finishRequestLog(reqID, status, 0)
+}
+
+// sendErrorWithDebug writes an error response and mirrors the exact client-facing
+// response into the deep debug log.
+func (h *ProxyHandler) sendErrorWithDebug(w http.ResponseWriter, reqID string, status int, code, message string, deepLog *debuglog.RequestLog) {
+	if status <= 0 {
+		status = http.StatusBadGateway
+	}
+	if deepLog != nil {
+		headers := w.Header().Clone()
+		headers.Set("Content-Type", "application/json")
+		body, _ := json.Marshal(map[string]interface{}{
+			"error": map[string]interface{}{"type": "error", "code": code, "message": message, "status": status},
+		})
+		body = append(body, '\n')
+		deepLog.LogClientResponseHeader(status, headers)
+		deepLog.LogClientResponseBody(body)
+	}
+	h.sendError(w, reqID, status, code, message)
+}
+
+// logUpstreamHTTPError records the upstream status separately from the status
+// returned to the client, preserving the real upstream error reason.
+func (h *ProxyHandler) logUpstreamHTTPError(
+	reqID string,
+	ch *channel.Channel,
+	key, model, url string,
+	upstreamStatus, clientStatus int,
+	responseHeader http.Header,
+	body []byte,
+	readErr error,
+	deepLog *debuglog.RequestLog,
+) {
+	reason := strings.TrimSpace(string(body))
+	if reason == "" && readErr != nil {
+		reason = readErr.Error()
+	}
+	if reason == "" {
+		reason = "upstream returned an empty error response"
+	}
+
+	h.updateRequestLog(reqID, func(meta *requestLogMeta) {
+		meta.responseBytes = len(body)
+	})
+
+	fields := []any{
+		"channel_id", ch.Config.ID,
+		"channel_key", util.MaskKey(key),
+		"model", model,
+		"status", upstreamStatus,
+		"upstream_status", upstreamStatus,
+		"url", url,
+		"response_bytes", len(body),
+		"error_reason", reason,
+		"upstream_body", string(body),
+	}
+	if clientStatus > 0 {
+		fields = append(fields, "client_status", clientStatus)
+	}
+	if readErr != nil {
+		fields = append(fields, "read_error", readErr)
+	}
+	h.logger.RequestWarn(reqID, "子渠道返回错误", fields...)
+
+	if deepLog != nil {
+		deepLog.LogUpstreamResponseHeader(upstreamStatus, responseHeader)
+		deepLog.LogUpstreamResponseBody(body)
+	}
 }
 
 // recordLog inserts a request log entry into the database with usage data

@@ -170,26 +170,20 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		if resp.StatusCode == 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, 400)
-			h.sendError(w, reqID, 400, "bad_request", string(errBodyBytes))
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusServiceUnavailable, resp.Header, errBodyBytes, readErr, deepLog)
+			h.sendErrorWithDebug(w, reqID, http.StatusServiceUnavailable, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
 			return nil
 		}
 		if resp.StatusCode >= 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
 			rs.consecFails = 0
-			h.logger.RequestWarn(reqID, "子渠道返回错误",
-				"channel_id", ch.Config.ID,
-				"model", model,
-				"status", resp.StatusCode,
-				"url", url,
-				// "request_body", string(sourceBody),
-				"upstream_body", string(errBodyBytes),
-			)
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, resp.StatusCode, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 
@@ -305,26 +299,20 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		if resp.StatusCode == 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, 400)
-			h.sendError(w, reqID, 400, "bad_request", string(errBodyBytes))
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusServiceUnavailable, resp.Header, errBodyBytes, readErr, deepLog)
+			h.sendErrorWithDebug(w, reqID, http.StatusServiceUnavailable, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
 			return nil
 		}
 		if resp.StatusCode >= 400 {
-			errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.excluded[key.Value] = true
 			rs.consecFails = 0
-			h.logger.RequestWarn(reqID, "子渠道返回错误",
-				"channel_id", ch.Config.ID,
-				"model", model,
-				"status", resp.StatusCode,
-				"url", url,
-				// "request_body", string(sourceBody),
-				"upstream_body", string(errBodyBytes),
-			)
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, resp.StatusCode, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 
