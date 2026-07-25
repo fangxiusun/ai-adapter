@@ -419,7 +419,7 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 	if !ok {
 		h.sendError(w, reqID, 503, "no_conversion_path",
 			fmt.Sprintf("channel %s has no native interface and no conversion path to %s", ch.Config.ID, target))
-		return nil
+		return handledError(http.StatusServiceUnavailable, "no conversion path")
 	}
 	upstreamModel := model
 	if mi, ok := ch.ResolveModel(model); ok && mi.ID != "" {
@@ -431,13 +431,13 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 	if source == target {
 		rawBody = replaceModelInBody(rawBody, model, upstreamModel)
 		h.logger.RequestDebug(reqID, "构造渠道请求", "channel_id", ch.Config.ID, "client_model", model, "upstream_model", upstreamModel)
-		return h.nativeForward(w, r, reqID, ch, source, rawBody, model, stream, deepLog)
+		return h.nativeForward(w, r, reqID, ch, source, rawBody, model, upstreamModel, stream, deepLog)
 	}
 	chatReq, err := h.buildChatRequest(target, targetReq, upstreamModel, stream)
 	h.logger.RequestDebug(reqID, "转换渠道请求", "channel_id", ch.Config.ID, "client_model", model, "upstream_model", upstreamModel)
 	if err != nil {
 		h.sendError(w, reqID, 400, "convert_failed", err.Error())
-		return nil
+		return handledError(http.StatusBadRequest, err.Error())
 	}
 	if stream {
 		return h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, upstreamModel, targetReq, deepLog)
@@ -457,7 +457,7 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 		// No failover — use balanced selection
 		ch := h.channels.SelectBalanced(candidates)
 
-		if failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog); failErr != nil {
+		if failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog); failErr != nil && !failErr.Handled {
 			h.sendError(w, reqID, failErr.StatusCode, "channel_dispatch_failed", failErr.Message)
 		}
 		return
@@ -489,8 +489,10 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 		failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog)
 
 		if failErr == nil {
-			// Success or non-failoverable error already handled
 			ch.ReportChannelSuccess()
+			return
+		}
+		if failErr.Handled {
 			return
 		}
 

@@ -188,6 +188,12 @@ func (cm *ChannelManager) ListChannels() []*Channel {
 	for _, ch := range cm.channels {
 		list = append(list, ch)
 	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Config.Priority == list[j].Config.Priority {
+			return list[i].Config.ID < list[j].Config.ID
+		}
+		return list[i].Config.Priority < list[j].Config.Priority
+	})
 	return list
 }
 
@@ -209,10 +215,15 @@ func (cm *ChannelManager) buildModelIndex() {
 			cm.modelIndex[modelID] = append(cm.modelIndex[modelID], ch)
 		}
 	}
-	// Sort by priority (lower number = higher priority)
+	// Sort by priority (lower number = higher priority), then ID for stability.
 	for modelID := range cm.modelIndex {
 		sort.Slice(cm.modelIndex[modelID], func(i, j int) bool {
-			return cm.modelIndex[modelID][i].Config.Priority < cm.modelIndex[modelID][j].Config.Priority
+			left := cm.modelIndex[modelID][i].Config
+			right := cm.modelIndex[modelID][j].Config
+			if left.Priority == right.Priority {
+				return left.ID < right.ID
+			}
+			return left.Priority < right.Priority
 		})
 	}
 }

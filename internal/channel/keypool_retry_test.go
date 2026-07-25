@@ -31,20 +31,34 @@ func TestNextExcludingHonorsAllStrategies(t *testing.T) {
 func TestOn401CountsRequest(t *testing.T) {
 	state := NewKeyState(3, 1, 1)
 	state.On401()
-	if state.RequestCount != 1 || state.Error401 != 1 || !state.PermanentlySkipped {
-		t.Fatalf("unexpected 401 state: %+v", state)
+	snapshot := state.Snapshot()
+	if snapshot.RequestCount != 1 || snapshot.Error401 != 1 || !snapshot.PermanentlySkipped {
+		t.Fatalf("unexpected 401 state: %+v", snapshot)
 	}
 }
 
-func TestOn429PausesAtConfiguredThreshold(t *testing.T) {
+func TestOn429NeverPausesKeyAcrossRequests(t *testing.T) {
 	state := NewKeyState(3, 1, 1)
 	state.On429()
 	state.On429()
-	if state.Paused {
-		t.Fatal("key paused before threshold")
-	}
 	state.On429()
-	if !state.Paused {
-		t.Fatal("key was not paused at threshold")
+	snapshot := state.Snapshot()
+	if snapshot.Paused || snapshot.ConsecErrors != 0 {
+		t.Fatalf("429 must remain request-local: %+v", snapshot)
+	}
+	if snapshot.RequestCount != 3 || snapshot.Error429 != 3 {
+		t.Fatalf("unexpected 429 counters: %+v", snapshot)
+	}
+}
+
+func TestOn5xxDoesNotPauseKey(t *testing.T) {
+	state := NewKeyState(1, 1, 1)
+	state.OnError5xx(500)
+	snapshot := state.Snapshot()
+	if snapshot.Paused || snapshot.ConsecErrors != 0 {
+		t.Fatalf("5xx must not make key unavailable: %+v", snapshot)
+	}
+	if snapshot.RequestCount != 1 || snapshot.Error5xx != 1 {
+		t.Fatalf("unexpected 5xx counters: %+v", snapshot)
 	}
 }

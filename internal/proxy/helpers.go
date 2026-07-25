@@ -3,7 +3,6 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/channel"
 	"github.com/fangxiusun/ai-adapter/internal/config"
 	"github.com/fangxiusun/ai-adapter/internal/debuglog"
+	"github.com/fangxiusun/ai-adapter/internal/metrics"
 	"github.com/fangxiusun/ai-adapter/internal/translate"
 	"github.com/fangxiusun/ai-adapter/internal/util"
 )
@@ -34,7 +34,33 @@ func (h *ProxyHandler) sendError(w http.ResponseWriter, reqID string, status int
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"error": map[string]interface{}{"type": "error", "code": code, "message": message, "status": status},
 	})
-	h.finishRequestLog(reqID, status, 0)
+	h.recordErrorLog(reqID, status, code, message)
+}
+
+func (h *ProxyHandler) recordErrorLog(reqID string, status int, code, message string) {
+	value, ok := h.requestLogs.Load(reqID)
+	if !ok {
+		return
+	}
+	meta := value.(*requestLogMeta)
+	clientAPI := apiTypeFromPath(meta.path)
+	h.recordLog(reqID, meta.channelID, clientAPI, "", meta.clientModel, meta.upstreamModel,
+		status, 0, meta.key, code, message, 0, 0, 0, "", clientAPI)
+}
+
+func apiTypeFromPath(path string) string {
+	switch {
+	case path == "/v1/chat/completions":
+		return string(config.InterfaceChat)
+	case path == "/v1/responses":
+		return string(config.InterfaceResponses)
+	case path == "/v1/messages":
+		return string(config.InterfaceMessages)
+	case strings.HasPrefix(path, "/v1beta/models/"):
+		return string(config.InterfaceGenerateContent)
+	default:
+		return "unknown"
+	}
 }
 
 // sendErrorWithDebug writes an error response and mirrors the exact client-facing

@@ -44,7 +44,7 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 		if result.StatusCode == http.StatusBadRequest {
 			h.logUpstreamHTTPError(reqID, ch, result.Key, model, url, http.StatusBadRequest, http.StatusTooManyRequests, nil, result.ResponseBody, nil, deepLog)
 			h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(result.ResponseBody), deepLog)
-			return nil
+			return handledError(http.StatusTooManyRequests, string(result.ResponseBody))
 		}
 		h.logger.RequestWarn(reqID, "子渠道并发流式请求失败", "channel_id", ch.Config.ID, "error", result.Error)
 		return &FailoverError{StatusCode: result.StatusCode, Message: fmt.Sprintf("channel %s: fanout stream failed: %s", ch.Config.ID, result.Error), AffectsChannelHealth: result.AffectsChannelHealth}
@@ -83,7 +83,8 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	if streamErr != nil {
 		ch.ReportStreamError(result.Key)
 		h.logger.RequestWarn(reqID, "并发流式转发失败", "channel_id", ch.Config.ID, "channel_key", result.Key, "error", streamErr)
-		return nil
+		h.recordErrorLog(reqID, http.StatusBadGateway, "stream_forward_failed", streamErr.Error())
+		return handledError(http.StatusBadGateway, streamErr.Error())
 	}
 	ch.ReportSuccess(result.Key)
 
@@ -101,7 +102,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 	sourceBody, err := json.Marshal(&injectedReq)
 	if err != nil {
 		h.sendError(w, reqID, 500, "marshal_failed", err.Error())
-		return nil
+		return handledError(http.StatusInternalServerError, err.Error())
 	}
 	path := upstreamPathForInterface(config.InterfaceChat, model, true)
 
@@ -121,7 +122,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		httpReq, err := http.NewRequestWithContext(retryCtx, "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
 			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
-			return nil
+			return handledError(http.StatusInternalServerError, err.Error())
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
@@ -181,9 +182,8 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			ch.ReportError(key.Value, http.StatusTooManyRequests)
 			rs.coolDown(key.Value)
 			rs.noteFailure(400, false)
-			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusTooManyRequests, resp.Header, errBodyBytes, readErr, deepLog)
-			// h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
-			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, 0, resp.Header, errBodyBytes, readErr, deepLog)
+			continue
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -225,7 +225,8 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		if streamErr != nil {
 			ch.ReportStreamError(key.Value)
 			h.logger.RequestWarn(reqID, "流式转换失败", "channel_id", ch.Config.ID, "error", streamErr)
-			return nil
+			h.recordErrorLog(reqID, http.StatusBadGateway, "stream_conversion_failed", streamErr.Error())
+			return handledError(http.StatusBadGateway, streamErr.Error())
 		}
 		ch.ReportSuccess(key.Value)
 		h.recordLog(reqID, ch.Config.ID, string(target), string(config.InterfaceChat), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
@@ -237,12 +238,12 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 	sourceReq, err := convertChatToSource(source, chatReq)
 	if err != nil {
 		h.sendError(w, reqID, 400, "convert_to_source_failed", err.Error())
-		return nil
+		return handledError(http.StatusBadRequest, err.Error())
 	}
 	sourceBody, err := json.Marshal(sourceReq)
 	if err != nil {
 		h.sendError(w, reqID, 500, "marshal_source_failed", err.Error())
-		return nil
+		return handledError(http.StatusInternalServerError, err.Error())
 	}
 	path := upstreamPathForInterface(source, model, true)
 	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
@@ -257,7 +258,7 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		httpReq, err := http.NewRequestWithContext(retryCtx, "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
 			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
-			return nil
+			return handledError(http.StatusInternalServerError, err.Error())
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+key.Value)
@@ -317,9 +318,8 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			ch.ReportError(key.Value, http.StatusTooManyRequests)
 			rs.coolDown(key.Value)
 			rs.noteFailure(400, false)
-			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusTooManyRequests, resp.Header, errBodyBytes, readErr, deepLog)
-			// h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
-			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, 0, resp.Header, errBodyBytes, readErr, deepLog)
+			continue
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -359,7 +359,8 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		if streamErr != nil {
 			ch.ReportStreamError(key.Value)
 			h.logger.RequestWarn(reqID, "跨协议流式转换失败", "channel_id", ch.Config.ID, "error", streamErr)
-			return nil
+			h.recordErrorLog(reqID, http.StatusBadGateway, "stream_conversion_failed", streamErr.Error())
+			return handledError(http.StatusBadGateway, streamErr.Error())
 		}
 		ch.ReportSuccess(key.Value)
 		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
@@ -422,7 +423,7 @@ func (h *ProxyHandler) pipeSourceStreamToChat(ctx context.Context, source config
 func (h *ProxyHandler) pipeChatStreamToTarget(ctx context.Context, target config.InterfaceType, upstream io.Reader, sink io.Writer, chatReq *translate.ChatRequest, targetReq interface{}, flusher func()) error {
 	switch target {
 	case config.InterfaceChat:
-		_, err := io.Copy(sink, upstream)
+		_, err := io.Copy(flushEachWrite(sink, flusher), upstream)
 		return err
 	case config.InterfaceResponses:
 		respReq, _ := targetReq.(*translate.ResponsesRequest)

@@ -93,9 +93,13 @@ func (h *WebHandler) handleChannels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *WebHandler) handleChannelByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/admin/api/channels/")
-	id = strings.TrimSuffix(id, "/keys")
-	id = strings.TrimSuffix(id, "/test")
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/admin/api/channels/"), "/")
+	parts := strings.SplitN(rest, "/", 2)
+	id := parts[0]
+	subroute := ""
+	if len(parts) == 2 {
+		subroute = parts[1]
+	}
 
 	ch, ok := h.channels.GetChannel(id)
 	if !ok {
@@ -103,28 +107,26 @@ func (h *WebHandler) handleChannelByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.HasSuffix(r.URL.Path, "/test") {
+	switch subroute {
+	case "test":
 		h.handleChannelTest(w, ch)
 		return
-	}
-
-	if strings.HasSuffix(r.URL.Path, "/keys/batch") {
+	case "keys/batch":
 		h.handleBatchKeys(w, r, ch)
 		return
-	}
-
-	if strings.HasSuffix(r.URL.Path, "/keys/export") {
+	case "keys/export":
 		h.handleExportKeys(w, r, ch)
 		return
-	}
-
-	if strings.HasSuffix(r.URL.Path, "/keys/import") {
+	case "keys/import":
 		h.handleImportKeys(w, r, ch)
 		return
-	}
-
-	if strings.HasSuffix(r.URL.Path, "/keys") {
+	case "keys":
 		h.handleChannelKeys(w, r, ch)
+		return
+	case "":
+		// Channel detail route.
+	default:
+		h.jsonError(w, 404, "not_found", "channel route not found")
 		return
 	}
 

@@ -90,6 +90,7 @@ func (db *DB) migrate() error {
 			last_success_time INTEGER,
 			paused INTEGER NOT NULL DEFAULT 0,
 			pause_until INTEGER,
+			permanently_skipped INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (channel_id, key_value)
 		)`,
 	}
@@ -103,6 +104,7 @@ func (db *DB) migrate() error {
 	// Incremental migrations for existing databases
 	alterMigrations := []string{
 		`ALTER TABLE request_logs ADD COLUMN usage_json TEXT`,
+		`ALTER TABLE key_stats ADD COLUMN permanently_skipped INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, m := range alterMigrations {
 		db.conn.Exec(m) // ignore "duplicate column" errors on re-run
@@ -226,26 +228,27 @@ func (db *DB) Vacuum() error {
 }
 
 type KeyStatsRow struct {
-	ChannelID       string
-	KeyName         string
-	KeyValue        string
-	RequestCount    int64
-	ErrorCount      int64
-	Error400        int64
-	Error401        int64
-	Error403        int64
-	Error404        int64
-	Error429        int64
-	Error4xx        int64
-	Error5xx        int64
-	ErrorNetwork    int64
-	ErrorStream     int64
-	TotalLatencyMs  int64
-	LastError       string
-	LastErrorTime   int64
-	LastSuccessTime int64
-	Paused          bool
-	PauseUntil      int64
+	ChannelID          string
+	KeyName            string
+	KeyValue           string
+	RequestCount       int64
+	ErrorCount         int64
+	Error400           int64
+	Error401           int64
+	Error403           int64
+	Error404           int64
+	Error429           int64
+	Error4xx           int64
+	Error5xx           int64
+	ErrorNetwork       int64
+	ErrorStream        int64
+	TotalLatencyMs     int64
+	LastError          string
+	LastErrorTime      int64
+	LastSuccessTime    int64
+	Paused             bool
+	PauseUntil         int64
+	PermanentlySkipped bool
 }
 
 func (db *DB) LoadKeyStats(channelID string) ([]KeyStatsRow, error) {
@@ -256,7 +259,7 @@ func (db *DB) LoadKeyStats(channelID string) ([]KeyStatsRow, error) {
 		`SELECT channel_id, key_name, key_value, request_count, error_count,
 		        error_400, error_401, error_403, error_404, error_429, error_4xx, error_5xx, error_network, error_stream,
 		        total_latency_ms,
-		        last_error, last_error_time, last_success_time, paused, pause_until
+	        last_error, last_error_time, last_success_time, paused, pause_until, permanently_skipped
 		 FROM key_stats WHERE channel_id = ?`, channelID)
 	if err != nil {
 		return nil, err
@@ -268,7 +271,7 @@ func (db *DB) LoadKeyStats(channelID string) ([]KeyStatsRow, error) {
 		var r KeyStatsRow
 		if err := rows.Scan(&r.ChannelID, &r.KeyName, &r.KeyValue, &r.RequestCount, &r.ErrorCount,
 			&r.Error400, &r.Error401, &r.Error403, &r.Error404, &r.Error429, &r.Error4xx, &r.Error5xx, &r.ErrorNetwork, &r.ErrorStream,
-			&r.TotalLatencyMs, &r.LastError, &r.LastErrorTime, &r.LastSuccessTime, &r.Paused, &r.PauseUntil); err != nil {
+			&r.TotalLatencyMs, &r.LastError, &r.LastErrorTime, &r.LastSuccessTime, &r.Paused, &r.PauseUntil, &r.PermanentlySkipped); err != nil {
 			continue
 		}
 		result = append(result, r)
@@ -283,8 +286,8 @@ func (db *DB) UpsertKeyStats(row KeyStatsRow) error {
 	_, err := db.conn.Exec(
 		`INSERT INTO key_stats (channel_id, key_name, key_value, request_count, error_count,
 		        error_400, error_401, error_403, error_404, error_429, error_4xx, error_5xx, error_network, error_stream,
-		        total_latency_ms, last_error, last_error_time, last_success_time, paused, pause_until)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	        total_latency_ms, last_error, last_error_time, last_success_time, paused, pause_until, permanently_skipped)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(channel_id, key_value) DO UPDATE SET
 		        key_name = excluded.key_name,
 		        request_count = excluded.request_count,
@@ -303,10 +306,11 @@ func (db *DB) UpsertKeyStats(row KeyStatsRow) error {
 		        last_error_time = excluded.last_error_time,
 		        last_success_time = excluded.last_success_time,
 		        paused = excluded.paused,
-		        pause_until = excluded.pause_until`,
+	        pause_until = excluded.pause_until,
+	        permanently_skipped = excluded.permanently_skipped`,
 		row.ChannelID, row.KeyName, row.KeyValue, row.RequestCount, row.ErrorCount,
 		row.Error400, row.Error401, row.Error403, row.Error404, row.Error429, row.Error4xx, row.Error5xx, row.ErrorNetwork, row.ErrorStream,
-		row.TotalLatencyMs, row.LastError, row.LastErrorTime, row.LastSuccessTime, row.Paused, row.PauseUntil)
+		row.TotalLatencyMs, row.LastError, row.LastErrorTime, row.LastSuccessTime, row.Paused, row.PauseUntil, row.PermanentlySkipped)
 	return err
 }
 
@@ -323,8 +327,8 @@ func (db *DB) SaveKeyStatsBatch(rows []KeyStatsRow) error {
 	stmt, err := tx.Prepare(
 		`INSERT INTO key_stats (channel_id, key_name, key_value, request_count, error_count,
 		        error_400, error_401, error_403, error_404, error_429, error_4xx, error_5xx, error_network, error_stream,
-		        total_latency_ms, last_error, last_error_time, last_success_time, paused, pause_until)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	        total_latency_ms, last_error, last_error_time, last_success_time, paused, pause_until, permanently_skipped)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(channel_id, key_value) DO UPDATE SET
 		        key_name = excluded.key_name,
 		        request_count = excluded.request_count,
@@ -343,7 +347,8 @@ func (db *DB) SaveKeyStatsBatch(rows []KeyStatsRow) error {
 		        last_error_time = excluded.last_error_time,
 		        last_success_time = excluded.last_success_time,
 		        paused = excluded.paused,
-		        pause_until = excluded.pause_until`)
+	        pause_until = excluded.pause_until,
+	        permanently_skipped = excluded.permanently_skipped`)
 	if err != nil {
 		return err
 	}
@@ -352,7 +357,7 @@ func (db *DB) SaveKeyStatsBatch(rows []KeyStatsRow) error {
 	for _, r := range rows {
 		if _, err := stmt.Exec(r.ChannelID, r.KeyName, r.KeyValue, r.RequestCount, r.ErrorCount,
 			r.Error400, r.Error401, r.Error403, r.Error404, r.Error429, r.Error4xx, r.Error5xx, r.ErrorNetwork, r.ErrorStream,
-			r.TotalLatencyMs, r.LastError, r.LastErrorTime, r.LastSuccessTime, r.Paused, r.PauseUntil); err != nil {
+			r.TotalLatencyMs, r.LastError, r.LastErrorTime, r.LastSuccessTime, r.Paused, r.PauseUntil, r.PermanentlySkipped); err != nil {
 			return err
 		}
 	}

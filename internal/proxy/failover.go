@@ -8,6 +8,11 @@ type FailoverError struct {
 	StatusCode           int    // upstream HTTP status code; 0 means connection failure
 	Message              string // human-readable description
 	AffectsChannelHealth bool   // only upstream 5xx and connection failures set this
+	Handled              bool   // response was already handled; do not fail over or write again
+}
+
+func handledError(statusCode int, message string) *FailoverError {
+	return &FailoverError{StatusCode: statusCode, Message: message, Handled: true}
 }
 
 func (e *FailoverError) Error() string {

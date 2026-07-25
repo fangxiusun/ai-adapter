@@ -1,7 +1,10 @@
 package translate
 
 import (
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func RespToResponses(resp *ChatResponse, req *ResponsesRequest, opts TranslateOpts) *ResponsesObject {
@@ -206,22 +209,11 @@ func getTextFormat(t *TextFormat) *TextFormat {
 	return &TextFormat{Type: "text"}
 }
 
-func generateResponseID() string  { return "resp_" + generateID() }
-func generateMessageID() string   { return "msg_" + generateID() }
+func generateResponseID() string     { return "resp_" + generateID() }
+func generateMessageID() string      { return "msg_" + generateID() }
 func generateFunctionCallID() string { return "fc_" + generateID() }
-func generateReasoningID() string { return "rs_" + generateID() }
+func generateReasoningID() string    { return "rs_" + generateID() }
 
 func generateID() string {
-	b := make([]byte, 18)
-	time.Now().AppendFormat(b, "0102030405060708000")
-	return base62Encode(b)
-}
-
-func base62Encode(data []byte) string {
-	const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	result := make([]byte, 24)
-	for i := range result {
-		result[i] = charset[int(data[i%len(data)])%len(charset)]
-	}
-	return string(result)
+	return strings.ReplaceAll(uuid.NewString(), "-", "")[:24]
 }

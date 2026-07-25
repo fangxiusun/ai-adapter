@@ -33,6 +33,29 @@ type KeyState struct {
 	mu                 sync.RWMutex
 }
 
+type KeyStateSnapshot struct {
+	RequestCount       int64
+	ErrorCount         int64
+	Error400           int64
+	Error401           int64
+	Error403           int64
+	Error404           int64
+	Error429           int64
+	Error4xx           int64
+	Error5xx           int64
+	ErrorNetwork       int64
+	ErrorStream        int64
+	ConsecErrors       int
+	TotalLatencyMs     int64
+	LastError          string
+	LastErrorTime      time.Time
+	LastSuccessTime    time.Time
+	Paused             bool
+	PauseUntil         time.Time
+	PermanentlySkipped bool
+	RateLimitCount     int
+}
+
 func NewKeyState(consecThreshold, pauseMultiplierSec, pauseMaxSec int) *KeyState {
 	if consecThreshold <= 0 {
 		consecThreshold = 3
@@ -48,6 +71,69 @@ func NewKeyState(consecThreshold, pauseMultiplierSec, pauseMaxSec int) *KeyState
 		pauseMultiplierSec: pauseMultiplierSec,
 		pauseMaxSec:        pauseMaxSec,
 	}
+}
+
+func (ks *KeyState) Snapshot() KeyStateSnapshot {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return KeyStateSnapshot{
+		RequestCount: ks.RequestCount, ErrorCount: ks.ErrorCount,
+		Error400: ks.Error400, Error401: ks.Error401, Error403: ks.Error403,
+		Error404: ks.Error404, Error429: ks.Error429, Error4xx: ks.Error4xx,
+		Error5xx: ks.Error5xx, ErrorNetwork: ks.ErrorNetwork, ErrorStream: ks.ErrorStream,
+		ConsecErrors: ks.ConsecErrors, TotalLatencyMs: ks.TotalLatencyMs,
+		LastError: ks.LastError, LastErrorTime: ks.LastErrorTime,
+		LastSuccessTime: ks.LastSuccessTime, Paused: ks.Paused,
+		PauseUntil: ks.PauseUntil, PermanentlySkipped: ks.PermanentlySkipped,
+		RateLimitCount: ks.RateLimitCount,
+	}
+}
+
+func (ks *KeyState) Restore(snapshot KeyStateSnapshot) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.RequestCount = snapshot.RequestCount
+	ks.ErrorCount = snapshot.ErrorCount
+	ks.Error400 = snapshot.Error400
+	ks.Error401 = snapshot.Error401
+	ks.Error403 = snapshot.Error403
+	ks.Error404 = snapshot.Error404
+	ks.Error429 = snapshot.Error429
+	ks.Error4xx = snapshot.Error4xx
+	ks.Error5xx = snapshot.Error5xx
+	ks.ErrorNetwork = snapshot.ErrorNetwork
+	ks.ErrorStream = snapshot.ErrorStream
+	ks.ConsecErrors = snapshot.ConsecErrors
+	ks.TotalLatencyMs = snapshot.TotalLatencyMs
+	ks.LastError = snapshot.LastError
+	ks.LastErrorTime = snapshot.LastErrorTime
+	ks.LastSuccessTime = snapshot.LastSuccessTime
+	ks.Paused = snapshot.Paused
+	ks.PauseUntil = snapshot.PauseUntil
+	ks.PermanentlySkipped = snapshot.PermanentlySkipped
+	ks.RateLimitCount = snapshot.RateLimitCount
+}
+
+func (ks *KeyState) IsPermanentlySkipped() bool {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+	return ks.PermanentlySkipped
+}
+
+func (ks *KeyState) PauseFor(duration time.Duration) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.Paused = true
+	ks.PauseUntil = time.Now().Add(duration)
+}
+
+func (ks *KeyState) Resume() {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.Paused = false
+	ks.PauseUntil = time.Time{}
+	ks.ConsecErrors = 0
+	ks.PermanentlySkipped = false
 }
 
 func (ks *KeyState) IsAvailable() bool {
@@ -128,18 +214,6 @@ func (ks *KeyState) On429() {
 	}
 	ks.RateLimitWindow = valid
 	ks.RateLimitCount = len(valid)
-
-	ks.ConsecErrors++
-	if ks.ConsecErrors >= ks.consecThreshold {
-		pauseSec := (ks.ConsecErrors - ks.consecThreshold + 1) * ks.pauseMultiplierSec
-		pauseDuration := time.Duration(pauseSec) * time.Second
-		maxDuration := time.Duration(ks.pauseMaxSec) * time.Second
-		if pauseDuration > maxDuration {
-			pauseDuration = maxDuration
-		}
-		ks.Paused = true
-		ks.PauseUntil = now.Add(pauseDuration)
-	}
 }
 
 func (ks *KeyState) OnError4xx() {
@@ -147,7 +221,7 @@ func (ks *KeyState) OnError4xx() {
 }
 
 func (ks *KeyState) OnError5xx(statusCode int) {
-	ks.recordError(&ks.Error5xx, "5xx Server Error")
+	ks.recordErrorWithoutPause(&ks.Error5xx, "5xx Server Error")
 }
 
 func (ks *KeyState) OnErrorNetwork() {
@@ -179,6 +253,18 @@ func (ks *KeyState) recordError(counter *int64, msg string) {
 		ks.Paused = true
 		ks.PauseUntil = time.Now().Add(pauseDuration)
 	}
+}
+
+// recordErrorWithoutPause records upstream failures that should not make a key
+// unavailable across requests. Request-local rotation is handled by RetryState.
+func (ks *KeyState) recordErrorWithoutPause(counter *int64, msg string) {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+	ks.RequestCount++
+	*counter++
+	ks.ErrorCount++
+	ks.LastError = msg
+	ks.LastErrorTime = time.Now()
 }
 
 func (ks *KeyState) ResetPause() {

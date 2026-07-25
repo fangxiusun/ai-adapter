@@ -20,15 +20,18 @@ type KeyEntry struct {
 }
 
 type KeyPool struct {
-	keys         []*KeyEntry
-	strategy     string
-	channelID    string
-	counter      uint64
-	logger       *log.Logger
-	mu           sync.RWMutex
-	database     *db.DB
-	syncInterval time.Duration
-	stopCh       chan struct{}
+	keys               []*KeyEntry
+	strategy           string
+	channelID          string
+	counter            uint64
+	logger             *log.Logger
+	mu                 sync.RWMutex
+	database           *db.DB
+	syncInterval       time.Duration
+	stopCh             chan struct{}
+	consecThreshold    int
+	pauseMultiplierSec int
+	pauseMaxSec        int
 }
 
 func NewKeyPool(keyCfgs []config.KeyConfig, strategy, channelID string, logger *log.Logger, consecThreshold, pauseMultiplierSec, pauseMaxSec int, database *db.DB, syncInterval time.Duration) *KeyPool {
@@ -45,13 +48,16 @@ func NewKeyPool(keyCfgs []config.KeyConfig, strategy, channelID string, logger *
 		}
 	}
 	kp := &KeyPool{
-		keys:         keys,
-		strategy:     strategy,
-		channelID:    channelID,
-		logger:       logger,
-		database:     database,
-		syncInterval: syncInterval,
-		stopCh:       make(chan struct{}),
+		keys:               keys,
+		strategy:           strategy,
+		channelID:          channelID,
+		logger:             logger,
+		database:           database,
+		syncInterval:       syncInterval,
+		stopCh:             make(chan struct{}),
+		consecThreshold:    consecThreshold,
+		pauseMultiplierSec: pauseMultiplierSec,
+		pauseMaxSec:        pauseMaxSec,
 	}
 	kp.loadFromDB()
 	if syncInterval > 0 && database != nil {
@@ -79,7 +85,7 @@ func (kp *KeyPool) Next() *KeyEntry {
 		kp.mu.Lock()
 		allSkipped := true
 		for _, k := range kp.keys {
-			if !k.State.PermanentlySkipped {
+			if !k.State.IsPermanentlySkipped() {
 				allSkipped = false
 				k.State.ResetPause()
 			}
@@ -107,7 +113,7 @@ func (kp *KeyPool) Next() *KeyEntry {
 	defer kp.mu.RUnlock()
 	filtered := available[:0]
 	for _, k := range available {
-		if k.State.IsAvailable() && !k.State.PermanentlySkipped {
+		if k.State.IsAvailable() {
 			filtered = append(filtered, k)
 		}
 	}
@@ -126,7 +132,7 @@ func (kp *KeyPool) Next() *KeyEntry {
 	case "least-errors":
 		best := available[0]
 		for _, k := range available[1:] {
-			if k.State.ErrorCount < best.State.ErrorCount {
+			if k.State.Snapshot().ErrorCount < best.State.Snapshot().ErrorCount {
 				best = k
 			}
 		}
@@ -183,7 +189,7 @@ func (kp *KeyPool) NextExcluding(exclude map[string]bool) *KeyEntry {
 	case "least-errors":
 		best := available[0]
 		for _, k := range available[1:] {
-			if k.State.ErrorCount < best.State.ErrorCount {
+			if k.State.Snapshot().ErrorCount < best.State.Snapshot().ErrorCount {
 				best = k
 			}
 		}
@@ -237,29 +243,25 @@ func (kp *KeyPool) loadFromDB() {
 	defer kp.mu.Unlock()
 	for _, k := range kp.keys {
 		if r, ok := rowMap[k.Value]; ok {
-			k.State.RequestCount = r.RequestCount
-			k.State.ErrorCount = r.ErrorCount
-			k.State.Error400 = r.Error400
-			k.State.Error401 = r.Error401
-			k.State.Error403 = r.Error403
-			k.State.Error404 = r.Error404
-			k.State.Error429 = r.Error429
-			k.State.Error4xx = r.Error4xx
-			k.State.Error5xx = r.Error5xx
-			k.State.ErrorNetwork = r.ErrorNetwork
-			k.State.ErrorStream = r.ErrorStream
-			k.State.TotalLatencyMs = r.TotalLatencyMs
-			k.State.LastError = r.LastError
+			snapshot := KeyStateSnapshot{
+				RequestCount: r.RequestCount, ErrorCount: r.ErrorCount,
+				Error400: r.Error400, Error401: r.Error401, Error403: r.Error403,
+				Error404: r.Error404, Error429: r.Error429, Error4xx: r.Error4xx,
+				Error5xx: r.Error5xx, ErrorNetwork: r.ErrorNetwork,
+				ErrorStream: r.ErrorStream, TotalLatencyMs: r.TotalLatencyMs,
+				LastError: r.LastError, Paused: r.Paused,
+				PermanentlySkipped: r.PermanentlySkipped,
+			}
 			if r.LastErrorTime > 0 {
-				k.State.LastErrorTime = time.UnixMilli(r.LastErrorTime)
+				snapshot.LastErrorTime = time.UnixMilli(r.LastErrorTime)
 			}
 			if r.LastSuccessTime > 0 {
-				k.State.LastSuccessTime = time.UnixMilli(r.LastSuccessTime)
+				snapshot.LastSuccessTime = time.UnixMilli(r.LastSuccessTime)
 			}
-			k.State.Paused = r.Paused
 			if r.PauseUntil > 0 {
-				k.State.PauseUntil = time.UnixMilli(r.PauseUntil)
+				snapshot.PauseUntil = time.UnixMilli(r.PauseUntil)
 			}
+			k.State.Restore(snapshot)
 		}
 	}
 }
@@ -288,27 +290,29 @@ func (kp *KeyPool) SaveToDB() {
 	kp.mu.RLock()
 	rows := make([]db.KeyStatsRow, 0, len(kp.keys))
 	for _, k := range kp.keys {
+		snapshot := k.State.Snapshot()
 		rows = append(rows, db.KeyStatsRow{
-			ChannelID:       kp.channelID,
-			KeyName:         k.Name,
-			KeyValue:        k.Value,
-			RequestCount:    k.State.RequestCount,
-			ErrorCount:      k.State.ErrorCount,
-			Error400:        k.State.Error400,
-			Error401:        k.State.Error401,
-			Error403:        k.State.Error403,
-			Error404:        k.State.Error404,
-			Error429:        k.State.Error429,
-			Error4xx:        k.State.Error4xx,
-			Error5xx:        k.State.Error5xx,
-			ErrorNetwork:    k.State.ErrorNetwork,
-			ErrorStream:     k.State.ErrorStream,
-			TotalLatencyMs:  k.State.TotalLatencyMs,
-			LastError:       k.State.LastError,
-			LastErrorTime:   k.State.LastErrorTime.UnixMilli(),
-			LastSuccessTime: k.State.LastSuccessTime.UnixMilli(),
-			Paused:          k.State.Paused,
-			PauseUntil:      k.State.PauseUntil.UnixMilli(),
+			ChannelID:          kp.channelID,
+			KeyName:            k.Name,
+			KeyValue:           k.Value,
+			RequestCount:       snapshot.RequestCount,
+			ErrorCount:         snapshot.ErrorCount,
+			Error400:           snapshot.Error400,
+			Error401:           snapshot.Error401,
+			Error403:           snapshot.Error403,
+			Error404:           snapshot.Error404,
+			Error429:           snapshot.Error429,
+			Error4xx:           snapshot.Error4xx,
+			Error5xx:           snapshot.Error5xx,
+			ErrorNetwork:       snapshot.ErrorNetwork,
+			ErrorStream:        snapshot.ErrorStream,
+			TotalLatencyMs:     snapshot.TotalLatencyMs,
+			LastError:          snapshot.LastError,
+			LastErrorTime:      unixMilliOrZero(snapshot.LastErrorTime),
+			LastSuccessTime:    unixMilliOrZero(snapshot.LastSuccessTime),
+			Paused:             snapshot.Paused,
+			PauseUntil:         unixMilliOrZero(snapshot.PauseUntil),
+			PermanentlySkipped: snapshot.PermanentlySkipped,
 		})
 	}
 	kp.mu.RUnlock()
@@ -374,8 +378,9 @@ func (kp *KeyPool) ReportError(key string, statusCode int) {
 			default:
 				k.State.OnErrorNetwork()
 			}
-			if k.State.Paused {
-				kp.logger.LogKeyPaused(kp.channelID, k.Name, k.State.ConsecErrors, k.State.PauseUntil)
+			snapshot := k.State.Snapshot()
+			if snapshot.Paused {
+				kp.logger.LogKeyPaused(kp.channelID, k.Name, snapshot.ConsecErrors, snapshot.PauseUntil)
 			}
 			return
 		}
@@ -388,8 +393,9 @@ func (kp *KeyPool) ReportStreamError(key string) {
 	for _, k := range kp.keys {
 		if k.Value == key {
 			k.State.OnErrorStream()
-			if k.State.Paused {
-				kp.logger.LogKeyPaused(kp.channelID, k.Name, k.State.ConsecErrors, k.State.PauseUntil)
+			snapshot := k.State.Snapshot()
+			if snapshot.Paused {
+				kp.logger.LogKeyPaused(kp.channelID, k.Name, snapshot.ConsecErrors, snapshot.PauseUntil)
 			}
 			return
 		}
@@ -401,28 +407,29 @@ func (kp *KeyPool) GetStats() []KeyStats {
 	defer kp.mu.RUnlock()
 	var stats []KeyStats
 	for _, k := range kp.keys {
+		snapshot := k.State.Snapshot()
 		stats = append(stats, KeyStats{
 			Name:               k.Name,
 			Value:              k.Value,
-			RequestCount:       k.State.RequestCount,
-			ErrorCount:         k.State.ErrorCount,
-			Error400:           k.State.Error400,
-			Error401:           k.State.Error401,
-			Error403:           k.State.Error403,
-			Error404:           k.State.Error404,
-			Error429:           k.State.Error429,
-			Error4xx:           k.State.Error4xx,
-			Error5xx:           k.State.Error5xx,
-			ErrorNetwork:       k.State.ErrorNetwork,
-			ErrorStream:        k.State.ErrorStream,
-			AvgLatencyMs:       k.State.AvgLatencyMs(),
-			LastSuccessTime:    k.State.LastSuccessTime,
-			LastErrorTime:      k.State.LastErrorTime,
-			LastError:          k.State.LastError,
-			Paused:             k.State.Paused,
-			PauseUntil:         k.State.PauseUntil,
-			PermanentlySkipped: k.State.PermanentlySkipped,
-			RateLimitCount:     k.State.RateLimitCount,
+			RequestCount:       snapshot.RequestCount,
+			ErrorCount:         snapshot.ErrorCount,
+			Error400:           snapshot.Error400,
+			Error401:           snapshot.Error401,
+			Error403:           snapshot.Error403,
+			Error404:           snapshot.Error404,
+			Error429:           snapshot.Error429,
+			Error4xx:           snapshot.Error4xx,
+			Error5xx:           snapshot.Error5xx,
+			ErrorNetwork:       snapshot.ErrorNetwork,
+			ErrorStream:        snapshot.ErrorStream,
+			AvgLatencyMs:       averageLatency(snapshot),
+			LastSuccessTime:    snapshot.LastSuccessTime,
+			LastErrorTime:      snapshot.LastErrorTime,
+			LastError:          snapshot.LastError,
+			Paused:             snapshot.Paused,
+			PauseUntil:         snapshot.PauseUntil,
+			PermanentlySkipped: snapshot.PermanentlySkipped,
+			RateLimitCount:     snapshot.RateLimitCount,
 		})
 	}
 	return stats
@@ -434,7 +441,8 @@ func (kp *KeyPool) GetValidKeys() []config.KeyConfig {
 	defer kp.mu.RUnlock()
 	var valid []config.KeyConfig
 	for _, k := range kp.keys {
-		if k.State.Error401 == 0 && !k.State.PermanentlySkipped {
+		snapshot := k.State.Snapshot()
+		if snapshot.Error401 == 0 && !snapshot.PermanentlySkipped {
 			valid = append(valid, config.KeyConfig{Value: k.Value, Name: k.Name})
 		}
 	}
@@ -446,8 +454,7 @@ func (kp *KeyPool) PauseKey(keyValue string) {
 	defer kp.mu.Unlock()
 	for _, k := range kp.keys {
 		if k.Value == keyValue {
-			k.State.Paused = true
-			k.State.PauseUntil = time.Now().Add(24 * time.Hour)
+			k.State.PauseFor(24 * time.Hour)
 			return
 		}
 	}
@@ -458,8 +465,7 @@ func (kp *KeyPool) ResumeKey(keyValue string) {
 	defer kp.mu.Unlock()
 	for _, k := range kp.keys {
 		if k.Value == keyValue {
-			k.State.ResetPause()
-			k.State.PermanentlySkipped = false
+			k.State.Resume()
 			kp.logger.LogKeyResumed(kp.channelID, k.Name)
 			return
 		}
@@ -479,11 +485,14 @@ func (kp *KeyPool) SkipKey(keyName string) {
 
 // GetN returns up to n available keys for fanout.
 func (kp *KeyPool) GetN(n int) []*KeyEntry {
+	if n <= 0 {
+		return nil
+	}
 	kp.mu.RLock()
 	defer kp.mu.RUnlock()
 	var available []*KeyEntry
 	for _, k := range kp.keys {
-		if k.State.IsAvailable() && !k.State.PermanentlySkipped {
+		if k.State.IsAvailable() {
 			available = append(available, k)
 		}
 	}
@@ -550,8 +559,22 @@ func (kp *KeyPool) AddKey(value, name string) error {
 	entry := &KeyEntry{
 		Name:  name,
 		Value: value,
-		State: NewKeyState(3, 30, 600),
+		State: NewKeyState(kp.consecThreshold, kp.pauseMultiplierSec, kp.pauseMaxSec),
 	}
 	kp.keys = append(kp.keys, entry)
 	return nil
+}
+
+func unixMilliOrZero(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UnixMilli()
+}
+
+func averageLatency(snapshot KeyStateSnapshot) int64 {
+	if snapshot.RequestCount == 0 {
+		return 0
+	}
+	return snapshot.TotalLatencyMs / snapshot.RequestCount
 }

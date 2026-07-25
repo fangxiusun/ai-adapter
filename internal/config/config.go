@@ -288,6 +288,12 @@ func (c *Config) validate() error {
 	if len(c.Channels) == 0 {
 		return fmt.Errorf("at least one channel is required")
 	}
+	if c.Server.MaxRequestBodySizeMB < 0 {
+		return fmt.Errorf("server max_request_body_size_mb must not be negative")
+	}
+	if c.Failover.MaxChannelAttempts < 0 || c.Failover.TotalTimeoutMs < 0 || c.Failover.ConsecutiveFailThreshold < 0 {
+		return fmt.Errorf("failover retry and timeout values must not be negative")
+	}
 	ids := make(map[string]bool)
 	for _, ch := range c.Channels {
 		if ch.ID == "" {
@@ -299,6 +305,16 @@ func (c *Config) validate() error {
 		ids[ch.ID] = true
 		if ch.ProxyID != "" && !proxyIDs[ch.ProxyID] {
 			return fmt.Errorf("channel %s: proxy_id %q not found in proxies", ch.ID, ch.ProxyID)
+		}
+		if ch.MaxRetries < 0 || ch.RetryDelayMs < 0 || ch.RequestTimeoutMs < 0 || ch.KeyStatsSyncSec < 0 {
+			return fmt.Errorf("channel %s: retry, timeout, and key_stats_sync_sec values must not be negative", ch.ID)
+		}
+		if ch.Fanout.Count < 0 {
+			return fmt.Errorf("channel %s: fanout count must not be negative", ch.ID)
+		}
+		if ch.Retry.RetryDelay429Ms < 0 || ch.Retry.MaxRotationRounds < 0 || ch.Retry.MaxTotalWaitMs < 0 ||
+			ch.Retry.ConsecErrorThreshold < 0 || ch.Retry.PauseMultiplierSec < 0 || ch.Retry.PauseMaxSec < 0 {
+			return fmt.Errorf("channel %s: retry policy values must not be negative", ch.ID)
 		}
 		if len(ch.Keys) == 0 {
 			return fmt.Errorf("channel %s: at least one key is required", ch.ID)

@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,15 +14,14 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/log"
 )
 
-func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
-	const upstreamReason = `{"error":{"message":"real upstream reason"}}`
-
+func TestUpstreamBadRequestRotatesToNextKey(t *testing.T) {
 	tests := []struct {
 		name     string
 		source   config.InterfaceType
 		target   config.InterfaceType
 		endpoint string
 		body     string
+		stream   bool
 	}{
 		{
 			name:     "native non-stream",
@@ -39,6 +36,7 @@ func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
 			target:   config.InterfaceChat,
 			endpoint: "/v1/chat/completions",
 			body:     `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			stream:   true,
 		},
 		{
 			name:     "converted non-stream",
@@ -53,6 +51,7 @@ func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
 			target:   config.InterfaceResponses,
 			endpoint: "/v1/responses",
 			body:     `{"model":"test-model","input":"hi","stream":true}`,
+			stream:   true,
 		},
 		{
 			name:     "converted stream chain",
@@ -60,20 +59,42 @@ func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
 			target:   config.InterfaceChat,
 			endpoint: "/v1/chat/completions",
 			body:     `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			stream:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			var firstAuthorization string
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(upstreamReason))
+				if calls.Add(1) == 1 {
+					firstAuthorization = r.Header.Get("Authorization")
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":{"message":"first key failed"}}`))
+					return
+				}
+				if r.Header.Get("Authorization") == firstAuthorization {
+					t.Errorf("second attempt reused the failed key: %s", firstAuthorization)
+				}
+				if !tt.stream {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"id":"chatcmpl-ok","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if tt.source == config.InterfaceResponses {
+					_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-ok\",\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"model\":\"test-model\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+					return
+				}
+				_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-ok\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-ok\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\ndata: [DONE]\n\n"))
 			}))
 			defer upstream.Close()
 
-			logPath := filepath.Join(t.TempDir(), "proxy.log")
-			logger := log.New("warn", logPath, false, false)
+			logger := log.New("error", "", false, false)
+			logger.SetEnabled(false)
+			defer logger.Close()
 
 			channelConfig := config.ChannelConfig{
 				ID:               "test-channel",
@@ -81,7 +102,7 @@ func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
 				Enabled:          true,
 				DefaultModel:     "test-model",
 				Models:           []config.ModelConfig{{ID: "test-model", DisplayName: "test-model"}},
-				Keys:             []config.KeyConfig{{Value: "sk-test", Name: "key-1"}},
+				Keys:             []config.KeyConfig{{Value: "sk-test-1", Name: "key-1"}, {Value: "sk-test-2", Name: "key-2"}},
 				KeyStrategy:      "round-robin",
 				RequestTimeoutMs: 1000,
 				Retry: config.RetryConfig{
@@ -113,6 +134,7 @@ func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
 				Channels: []config.ChannelConfig{channelConfig},
 			}
 			cm := channel.NewChannelManager(cfg.Channels, nil, logger, nil, "priority")
+			defer cm.Stop()
 			handler := NewProxyHandler(cm, nil, logger, cfg, debuglog.New(false), nil, nil, nil)
 
 			req := httptest.NewRequest(http.MethodPost, tt.endpoint, strings.NewReader(tt.body))
@@ -126,32 +148,18 @@ func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
 				t.Fatalf("unsupported test target: %s", tt.target)
 			}
 
-			if rec.Code != http.StatusTooManyRequests {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 			}
-			if !strings.Contains(rec.Body.String(), upstreamBadRequestErrorCode) {
-				t.Fatalf("response does not contain error code %q: %s", upstreamBadRequestErrorCode, rec.Body.String())
+			if calls.Load() != 2 {
+				t.Fatalf("upstream calls = %d, want 2", calls.Load())
 			}
-			if !strings.Contains(rec.Body.String(), "real upstream reason") {
-				t.Fatalf("response does not preserve upstream reason: %s", rec.Body.String())
+			var rateLimitErrors int64
+			for _, keyStats := range cm.ListChannels()[0].KeyPool().GetStats() {
+				rateLimitErrors += keyStats.Error429
 			}
-
-			logger.Close()
-			logBytes, err := os.ReadFile(logPath)
-			if err != nil {
-				t.Fatalf("read log: %v", err)
-			}
-			logText := string(logBytes)
-			for _, expected := range []string{
-				"upstream_status=400",
-				"client_status=429",
-				"error_reason=",
-				"real upstream reason",
-				"error_code=upstream_bad_request",
-			} {
-				if !strings.Contains(logText, expected) {
-					t.Errorf("log does not contain %q: %s", expected, logText)
-				}
+			if rateLimitErrors != 1 {
+				t.Fatalf("mapped 429 count = %d, want 1", rateLimitErrors)
 			}
 		})
 	}
