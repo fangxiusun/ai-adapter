@@ -179,9 +179,11 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, http.StatusTooManyRequests)
+			rs.coolDown(key.Value)
+			rs.noteFailure(400, false)
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusTooManyRequests, resp.Header, errBodyBytes, readErr, deepLog)
-			h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
-			return nil
+			// h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
+			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -313,9 +315,11 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, http.StatusTooManyRequests)
+			rs.coolDown(key.Value)
+			rs.noteFailure(400, false)
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusTooManyRequests, resp.Header, errBodyBytes, readErr, deepLog)
-			h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
-			return nil
+			// h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
+			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
