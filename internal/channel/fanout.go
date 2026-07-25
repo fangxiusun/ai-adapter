@@ -25,6 +25,9 @@ type FanoutResult struct {
 	LatencyMs  int64
 	Error      error
 	StatusCode int
+	// AffectsChannelHealth is true when at least one failed attempt was a
+	// connection error or an upstream 5xx response.
+	AffectsChannelHealth bool
 }
 
 // Fanout sends the same request to multiple keys concurrently.
@@ -61,16 +64,32 @@ func (ch *Channel) Fanout(ctx context.Context, req FanoutRequest) *FanoutResult 
 	if !ch.FanoutWaitAll() {
 		// Return the first successful result, but keep draining losers so
 		// key health/error statistics stay accurate.
+		var lastStatus int
+		affectsChannelHealth := false
+		var badRequest *FanoutResult
 		for result := range results {
 			if isSuccessfulFanoutResult(result) {
-				ch.reportFanoutResult(result, false)
+				ch.reportFanoutResult(result)
 				cancel()
-				go ch.drainFanoutResults(results, true)
+				go ch.drainFanoutResults(results)
 				return result
 			}
-			ch.reportFanoutResult(result, false)
+			ch.reportFanoutResult(result)
+			if result != nil {
+				lastStatus = result.StatusCode
+				affectsChannelHealth = affectsChannelHealth || fanoutResultAffectsChannelHealth(result)
+				if result.StatusCode == http.StatusBadRequest {
+					badRequest = result
+				}
+			}
 		}
-		return &FanoutResult{Error: fmt.Errorf("all fanout keys failed")}
+		if badRequest != nil {
+			failed := *badRequest
+			failed.Error = fmt.Errorf("fanout upstream returned 400")
+			failed.AffectsChannelHealth = false
+			return &failed
+		}
+		return &FanoutResult{Error: fmt.Errorf("all fanout keys failed"), StatusCode: lastStatus, AffectsChannelHealth: affectsChannelHealth}
 	}
 
 	// WaitAll mode: collect all results, pick fastest 2xx.
@@ -89,55 +108,76 @@ func (ch *Channel) Fanout(ctx context.Context, req FanoutRequest) *FanoutResult 
 	}
 
 	if best != nil {
-		ch.ReportSuccess(best.Key)
-		// Report errors for non-winning keys.
 		for _, result := range all {
-			if result == best {
-				continue
-			}
-			if result.Error != nil {
-				ch.ReportError(result.Key, 0)
-			} else if result.StatusCode >= 200 && result.StatusCode < 300 {
-				ch.ReportSuccess(result.Key)
-			} else {
-				ch.ReportError(result.Key, result.StatusCode)
-			}
+			ch.reportFanoutResult(result)
 		}
 		return best
 	}
 
 	// All failed.
 	for _, result := range all {
-		ch.reportFanoutResult(result, false)
+		ch.reportFanoutResult(result)
 	}
-	return &FanoutResult{Error: fmt.Errorf("all fanout keys failed")}
+	result := &FanoutResult{Error: fmt.Errorf("all fanout keys failed")}
+	for _, failed := range all {
+		if failed != nil {
+			if failed.StatusCode == http.StatusBadRequest {
+				badRequest := *failed
+				badRequest.Error = fmt.Errorf("fanout upstream returned 400")
+				badRequest.AffectsChannelHealth = false
+				return &badRequest
+			}
+			result.StatusCode = failed.StatusCode
+			result.AffectsChannelHealth = result.AffectsChannelHealth || fanoutResultAffectsChannelHealth(failed)
+		}
+	}
+	return result
 }
 
 func isSuccessfulFanoutResult(result *FanoutResult) bool {
 	return result != nil && result.Error == nil && result.StatusCode >= 200 && result.StatusCode < 300
 }
 
-func (ch *Channel) reportFanoutResult(result *FanoutResult, skipCanceled bool) {
+func (ch *Channel) reportFanoutResult(result *FanoutResult) {
 	if result == nil {
 		return
 	}
 	if result.Error != nil {
-		if skipCanceled && errors.Is(result.Error, context.Canceled) {
+		if errors.Is(result.Error, context.Canceled) {
 			return
 		}
+		ch.RecordLatency(result.Key, result.LatencyMs)
 		ch.ReportError(result.Key, 0)
 		return
 	}
+	ch.RecordLatency(result.Key, result.LatencyMs)
 	if result.StatusCode >= 200 && result.StatusCode < 300 {
 		ch.ReportSuccess(result.Key)
 		return
 	}
-	ch.ReportError(result.Key, result.StatusCode)
+	ch.ReportError(result.Key, normalizeFanoutStatus(result.StatusCode))
 }
 
-func (ch *Channel) drainFanoutResults(results <-chan *FanoutResult, skipCanceled bool) {
+func normalizeFanoutStatus(statusCode int) int {
+	if statusCode == http.StatusBadRequest {
+		return http.StatusTooManyRequests
+	}
+	return statusCode
+}
+
+func fanoutResultAffectsChannelHealth(result *FanoutResult) bool {
+	if result == nil {
+		return false
+	}
+	if result.Error != nil {
+		return !errors.Is(result.Error, context.Canceled)
+	}
+	return result.StatusCode >= 500
+}
+
+func (ch *Channel) drainFanoutResults(results <-chan *FanoutResult) {
 	for result := range results {
-		ch.reportFanoutResult(result, skipCanceled)
+		ch.reportFanoutResult(result)
 	}
 }
 
@@ -147,7 +187,7 @@ func (ch *Channel) sendFanoutRequest(ctx context.Context, key *KeyEntry, req Fan
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", req.URL, bytes.NewReader(req.Body))
 	if err != nil {
-		return &FanoutResult{Key: key.Value, Error: fmt.Errorf("create request: %w", err)}
+		return &FanoutResult{Key: key.Value, Error: fmt.Errorf("create request: %w", err), LatencyMs: time.Since(start).Milliseconds()}
 	}
 
 	// Copy headers from the prepared request.
@@ -178,10 +218,24 @@ func (ch *Channel) sendFanoutRequest(ctx context.Context, key *KeyEntry, req Fan
 
 // FanoutStreamResult holds the result of a streaming fanout attempt.
 type FanoutStreamResult struct {
-	Response   *http.Response
-	Key        string
-	Error      error
-	StatusCode int
+	Response             *http.Response
+	ResponseBody         []byte
+	Key                  string
+	LatencyMs            int64
+	Error                error
+	StatusCode           int
+	AffectsChannelHealth bool
+}
+
+type cancelOnCloseReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelOnCloseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.cancel()
+	return err
 }
 
 // FanoutStream sends the same request to multiple keys concurrently and returns
@@ -194,24 +248,29 @@ func (ch *Channel) FanoutStream(ctx context.Context, req FanoutRequest) *FanoutS
 		return &FanoutStreamResult{Error: fmt.Errorf("no available keys")}
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-
 	type attempt struct {
-		resp *http.Response
-		key  *KeyEntry
-		err  error
+		resp      *http.Response
+		key       *KeyEntry
+		err       error
+		index     int
+		latencyMs int64
 	}
 
 	results := make(chan attempt, len(keys))
 	var wg sync.WaitGroup
 
-	for _, key := range keys {
+	cancels := make([]context.CancelFunc, len(keys))
+	for index, key := range keys {
+		attemptCtx, attemptCancel := context.WithCancel(ctx)
+		cancels[index] = attemptCancel
 		wg.Add(1)
-		go func(k *KeyEntry) {
+		go func(i int, k *KeyEntry, requestCtx context.Context, requestCancel context.CancelFunc) {
 			defer wg.Done()
-			httpReq, err := http.NewRequestWithContext(ctx, "POST", req.URL, bytes.NewReader(req.Body))
+			start := time.Now()
+			httpReq, err := http.NewRequestWithContext(requestCtx, "POST", req.URL, bytes.NewReader(req.Body))
 			if err != nil {
-				results <- attempt{key: k, err: err}
+				requestCancel()
+				results <- attempt{key: k, err: err, index: i, latencyMs: time.Since(start).Milliseconds()}
 				return
 			}
 			for hk, hv := range req.Headers {
@@ -222,11 +281,12 @@ func (ch *Channel) FanoutStream(ctx context.Context, req FanoutRequest) *FanoutS
 
 			resp, err := ch.httpClient.Do(httpReq)
 			if err != nil {
-				results <- attempt{key: k, err: err}
+				requestCancel()
+				results <- attempt{key: k, err: err, index: i, latencyMs: time.Since(start).Milliseconds()}
 				return
 			}
-			results <- attempt{resp: resp, key: k}
-		}(key)
+			results <- attempt{resp: resp, key: k, index: i, latencyMs: time.Since(start).Milliseconds()}
+		}(index, key, attemptCtx, attemptCancel)
 	}
 
 	go func() {
@@ -235,41 +295,77 @@ func (ch *Channel) FanoutStream(ctx context.Context, req FanoutRequest) *FanoutS
 	}()
 
 	var failures []attempt
+	var lastStatus int
+	affectsChannelHealth := false
+	var badRequest *FanoutStreamResult
 
 	// Wait for the first 200 response or all failures.
 	for a := range results {
 		if a.err != nil {
 			failures = append(failures, a)
-			ch.ReportError(a.key.Value, 0)
+			if !errors.Is(a.err, context.Canceled) {
+				ch.RecordLatency(a.key.Value, a.latencyMs)
+				ch.ReportError(a.key.Value, 0)
+				affectsChannelHealth = true
+			}
 			continue
 		}
 		if a.resp.StatusCode >= 200 && a.resp.StatusCode < 300 {
-			// Winner — cancel all others.
-			cancel()
+			// Cancel only losing attempts. Cancelling the winner's request context
+			// here would also interrupt reads from its response body.
+			for i, cancel := range cancels {
+				if i != a.index {
+					cancel()
+				}
+			}
 			// Drain failures in background to avoid goroutine leaks.
 			go func() {
 				for a := range results {
 					if a.resp != nil {
 						a.resp.Body.Close()
+						cancels[a.index]()
 					}
-					if a.key != nil {
+					if a.key != nil && a.err != nil && !errors.Is(a.err, context.Canceled) {
+						ch.RecordLatency(a.key.Value, a.latencyMs)
 						ch.ReportError(a.key.Value, 0)
+					} else if a.key != nil && a.resp != nil && (a.resp.StatusCode < 200 || a.resp.StatusCode >= 300) {
+						ch.RecordLatency(a.key.Value, a.latencyMs)
+						ch.ReportError(a.key.Value, normalizeFanoutStatus(a.resp.StatusCode))
 					}
 				}
 			}()
+			a.resp.Body = &cancelOnCloseReadCloser{ReadCloser: a.resp.Body, cancel: cancels[a.index]}
 			return &FanoutStreamResult{
 				Response:   a.resp,
 				Key:        a.key.Value,
+				LatencyMs:  a.latencyMs,
 				StatusCode: a.resp.StatusCode,
 			}
 		}
 		// Non-200 — close and report, keep waiting.
+		var responseBody []byte
+		if a.resp.StatusCode == http.StatusBadRequest {
+			responseBody, _ = io.ReadAll(io.LimitReader(a.resp.Body, 64*1024))
+		}
 		a.resp.Body.Close()
-		ch.ReportError(a.key.Value, a.resp.StatusCode)
+		cancels[a.index]()
+		ch.RecordLatency(a.key.Value, a.latencyMs)
+		ch.ReportError(a.key.Value, normalizeFanoutStatus(a.resp.StatusCode))
+		lastStatus = a.resp.StatusCode
+		affectsChannelHealth = affectsChannelHealth || a.resp.StatusCode >= 500
+		if a.resp.StatusCode == http.StatusBadRequest {
+			badRequest = &FanoutStreamResult{Key: a.key.Value, LatencyMs: a.latencyMs, StatusCode: a.resp.StatusCode, ResponseBody: responseBody}
+		}
 		failures = append(failures, a)
 	}
 
 	// All failed.
-	cancel()
-	return &FanoutStreamResult{Error: fmt.Errorf("all fanout keys failed (%d attempts)", len(failures))}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	if badRequest != nil {
+		badRequest.Error = fmt.Errorf("fanout upstream returned 400")
+		return badRequest
+	}
+	return &FanoutStreamResult{Error: fmt.Errorf("all fanout keys failed (%d attempts)", len(failures)), StatusCode: lastStatus, AffectsChannelHealth: affectsChannelHealth}
 }

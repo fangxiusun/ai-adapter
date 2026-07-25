@@ -74,7 +74,8 @@ func TestPipeResponsesStreamToChatFallsBackToCompletedSnapshot(t *testing.T) {
 		``,
 	}, "\n")
 
-	resp, err := PipeResponsesStreamToChat(context.Background(), strings.NewReader(input), &bytes.Buffer{}, &ChatRequest{Model: "client-model"}, TranslateOpts{})
+	var sink bytes.Buffer
+	resp, err := PipeResponsesStreamToChat(context.Background(), strings.NewReader(input), &sink, &ChatRequest{Model: "client-model"}, TranslateOpts{})
 	if err != nil {
 		t.Fatalf("PipeResponsesStreamToChat returned error: %v", err)
 	}
@@ -97,5 +98,11 @@ func TestPipeResponsesStreamToChatFallsBackToCompletedSnapshot(t *testing.T) {
 	tool := choice.Message.ToolCalls[0]
 	if tool.ID != "call_2" || tool.Function.Name != "search" || tool.Function.Arguments != `{"q":"codex"}` {
 		t.Fatalf("tool call = %+v", tool)
+	}
+	streamOutput := sink.String()
+	for _, expected := range []string{"hello", "think", "call_2", `\"q\":\"codex\"`, "[DONE]"} {
+		if !strings.Contains(streamOutput, expected) {
+			t.Fatalf("stream output missing %q: %s", expected, streamOutput)
+		}
 	}
 }

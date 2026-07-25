@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -465,6 +466,9 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 	// Reorder candidates based on load balance strategy (round-robin/random/priority)
 	candidates = h.channels.ReorderCandidates(candidates)
 	deadline := time.Now().Add(time.Duration(fc.TotalTimeoutMs) * time.Millisecond)
+	failoverCtx, cancelFailover := context.WithDeadline(r.Context(), deadline)
+	defer cancelFailover()
+	r = r.WithContext(failoverCtx)
 	tried := 0
 	var lastErr *FailoverError
 
@@ -490,8 +494,10 @@ func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqI
 			return
 		}
 
-		// Failoverable error — report to health tracker and try next channel
-		ch.ReportChannelFailure()
+		// Only upstream 5xx and connection failures affect channel health.
+		if failErr.AffectsChannelHealth {
+			ch.ReportChannelFailure()
+		}
 		lastErr = failErr
 		tried++
 		h.logger.RequestWarn(reqID, "切换下一渠道",

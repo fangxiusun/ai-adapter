@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
@@ -15,7 +16,7 @@ import (
 	"github.com/fangxiusun/ai-adapter/internal/log"
 )
 
-func TestUpstreamBadRequestIsMappedToServiceUnavailable(t *testing.T) {
+func TestUpstreamBadRequestIsMappedToRateLimit(t *testing.T) {
 	const upstreamReason = `{"error":{"message":"real upstream reason"}}`
 
 	tests := []struct {
@@ -125,8 +126,8 @@ func TestUpstreamBadRequestIsMappedToServiceUnavailable(t *testing.T) {
 				t.Fatalf("unsupported test target: %s", tt.target)
 			}
 
-			if rec.Code != http.StatusServiceUnavailable {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
 			}
 			if !strings.Contains(rec.Body.String(), upstreamBadRequestErrorCode) {
 				t.Fatalf("response does not contain error code %q: %s", upstreamBadRequestErrorCode, rec.Body.String())
@@ -143,7 +144,7 @@ func TestUpstreamBadRequestIsMappedToServiceUnavailable(t *testing.T) {
 			logText := string(logBytes)
 			for _, expected := range []string{
 				"upstream_status=400",
-				"client_status=503",
+				"client_status=429",
 				"error_reason=",
 				"real upstream reason",
 				"error_code=upstream_bad_request",
@@ -220,6 +221,66 @@ func TestHandleChatReturnsErrorWhenSingleChannelRequestFails(t *testing.T) {
 	})
 	if remaining != 0 {
 		t.Fatalf("request log metadata leaked after request: %d", remaining)
+	}
+}
+
+func TestChannelHealthCountsOnlyServerAndConnectionFailures(t *testing.T) {
+	tests := []struct {
+		name             string
+		primaryStatus    int
+		wantPrimaryCalls int32
+	}{
+		{name: "client errors do not affect channel health", primaryStatus: http.StatusForbidden, wantPrimaryCalls: 4},
+		{name: "server errors affect channel health", primaryStatus: http.StatusBadGateway, wantPrimaryCalls: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var primaryCalls atomic.Int32
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				primaryCalls.Add(1)
+				http.Error(w, http.StatusText(tt.primaryStatus), tt.primaryStatus)
+			}))
+			defer primary.Close()
+
+			backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+			}))
+			defer backup.Close()
+
+			logger := log.New("error", "", false, false)
+			logger.SetEnabled(false)
+			channelConfig := func(id, target string, priority int) config.ChannelConfig {
+				return config.ChannelConfig{
+					ID: id, Name: id, Enabled: true, Priority: priority,
+					DefaultModel: "test-model",
+					Models:       []config.ModelConfig{{ID: "test-model", DisplayName: "test-model"}},
+					Keys:         []config.KeyConfig{{Value: "sk-" + id, Name: "key-1"}},
+					KeyStrategy:  "round-robin", RequestTimeoutMs: 1000, ChatURL: target,
+					Retry: config.RetryConfig{RetryDelay429Ms: 1, MaxRotationRounds: 1, MaxTotalWaitMs: 1000, ConsecErrorThreshold: 100, PauseMultiplierSec: 1, PauseMaxSec: 1},
+				}
+			}
+			cfg := &config.Config{
+				Server:   config.ServerConfig{MaxRequestBodySizeMB: 1},
+				Failover: config.FailoverConfig{Enabled: true, MaxChannelAttempts: 2, TotalTimeoutMs: 2000, ConsecutiveFailThreshold: 1, LoadBalance: "priority"},
+				Channels: []config.ChannelConfig{channelConfig("primary", primary.URL, 1), channelConfig("backup", backup.URL, 2)},
+			}
+			cm := channel.NewChannelManager(cfg.Channels, nil, logger, nil, "priority")
+			handler := NewProxyHandler(cm, nil, logger, cfg, debuglog.New(false), nil, nil, nil)
+
+			for i := 0; i < 4; i++ {
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`))
+				rec := httptest.NewRecorder()
+				handler.HandleChat(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("request %d status = %d, want 200; body=%s", i+1, rec.Code, rec.Body.String())
+				}
+			}
+			if got := primaryCalls.Load(); got != tt.wantPrimaryCalls {
+				t.Fatalf("primary calls = %d, want %d", got, tt.wantPrimaryCalls)
+			}
+		})
 	}
 }
 

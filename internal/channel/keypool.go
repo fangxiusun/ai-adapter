@@ -176,9 +176,10 @@ func (kp *KeyPool) NextExcluding(exclude map[string]bool) *KeyEntry {
 		return nil
 	}
 
+	var selected *KeyEntry
 	switch kp.strategy {
 	case "least-rate-limited":
-		return kp.leastRateLimited(available)
+		selected = kp.leastRateLimited(available)
 	case "least-errors":
 		best := available[0]
 		for _, k := range available[1:] {
@@ -186,10 +187,25 @@ func (kp *KeyPool) NextExcluding(exclude map[string]bool) *KeyEntry {
 				best = k
 			}
 		}
-		return best
+		selected = best
+	case "least-latency":
+		best := available[0]
+		for _, k := range available[1:] {
+			if k.State.AvgLatencyMs() < best.State.AvgLatencyMs() {
+				best = k
+			}
+		}
+		selected = best
+	case "random":
+		selected = available[rand.Intn(len(available))]
 	default:
-		return available[rand.Intn(len(available))]
+		idx := atomic.AddUint64(&kp.counter, 1)
+		selected = available[idx%uint64(len(available))]
 	}
+	if selected != nil && selected.State.IsPauseExpired() {
+		selected.State.ResetPause()
+	}
+	return selected
 }
 
 func (kp *KeyPool) leastRateLimited(available []*KeyEntry) *KeyEntry {
@@ -301,7 +317,6 @@ func (kp *KeyPool) SaveToDB() {
 		kp.logger.Warn("failed to save key stats", "channel", kp.channelID, "error", err)
 	}
 }
-
 
 func (kp *KeyPool) ReportSuccess(key string) {
 	kp.mu.RLock()
@@ -462,7 +477,6 @@ func (kp *KeyPool) SkipKey(keyName string) {
 	}
 }
 
-
 // GetN returns up to n available keys for fanout.
 func (kp *KeyPool) GetN(n int) []*KeyEntry {
 	kp.mu.RLock()
@@ -496,7 +510,6 @@ func min(a, b int) int {
 	}
 	return b
 }
-
 
 // ListKeys returns all keys in the pool.
 func (kp *KeyPool) ListKeys() []config.KeyConfig {

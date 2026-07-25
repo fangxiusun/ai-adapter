@@ -108,6 +108,11 @@ func (h *ProxyHandler) logUpstreamHTTPError(
 // recordLog inserts a request log entry into the database with usage data
 // and records Prometheus metrics.
 func (h *ProxyHandler) recordLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, upstreamModel string, status int, latencyMs int64, key, errorCode, errorMsg string, promptTokens, completionTokens, totalTokens int, usageJSON string, apiType string) {
+	if value, ok := h.requestLogs.Load(reqID); ok {
+		if totalLatency := time.Since(value.(*requestLogMeta).start).Milliseconds(); totalLatency >= 0 {
+			latencyMs = totalLatency
+		}
+	}
 	h.setRequestRouteLog(reqID, channelID, key, upstreamModel)
 	if h.db != nil {
 		h.db.InsertLog(reqID, channelID, clientAPI, upstreamAPI, clientModel, upstreamModel, status, latencyMs, key, errorCode, errorMsg, promptTokens, completionTokens, totalTokens, usageJSON)

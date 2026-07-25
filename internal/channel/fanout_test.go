@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -70,6 +71,59 @@ func TestFanoutFastReturnReportsAllFailed(t *testing.T) {
 	waitForFanoutStat(t, time.Second, func(stats map[string]KeyStats) bool {
 		return stats["good-key"].Error5xx == 1 && stats["bad-key"].Error5xx == 1
 	}, ch)
+}
+
+func TestFanoutMapsBadRequestToRateLimitStats(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	ch := newTestFanoutChannel(server.URL, false)
+	result := ch.Fanout(context.Background(), FanoutRequest{Body: []byte(`{"input":"ping"}`), URL: server.URL, Headers: make(http.Header)})
+	if result == nil || result.Error == nil || result.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected preserved 400 failure, got %#v", result)
+	}
+	stats := fanoutStatsByKey(ch)
+	for _, key := range []string{"good-key", "bad-key"} {
+		if stats[key].Error400 != 0 || stats[key].Error429 != 1 {
+			t.Fatalf("expected %s 400 to count as 429, stats=%+v", key, stats[key])
+		}
+	}
+}
+
+func TestFanoutStreamKeepsWinnerReadableAndIgnoresCanceledLoser(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "Bearer good-key":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(30 * time.Millisecond)
+			_, _ = io.WriteString(w, "data: ok\n\n")
+		case "Bearer bad-key":
+			time.Sleep(100 * time.Millisecond)
+			http.Error(w, "late failure", http.StatusBadGateway)
+		}
+	}))
+	defer server.Close()
+
+	ch := newTestFanoutChannel(server.URL, false)
+	result := ch.FanoutStream(context.Background(), FanoutRequest{Body: []byte(`{"input":"ping"}`), URL: server.URL, Headers: make(http.Header)})
+	if result == nil || result.Error != nil || result.Response == nil {
+		t.Fatalf("expected stream winner, got %#v", result)
+	}
+	body, err := io.ReadAll(result.Response.Body)
+	_ = result.Response.Body.Close()
+	if err != nil || string(body) != "data: ok\n\n" {
+		t.Fatalf("winner body = %q, err=%v", body, err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	stats := fanoutStatsByKey(ch)
+	if stats["bad-key"].ErrorCount != 0 {
+		t.Fatalf("canceled loser must not be reported as an error, stats=%+v", stats["bad-key"])
+	}
 }
 
 func newTestFanoutChannel(targetURL string, waitAll bool) *Channel {

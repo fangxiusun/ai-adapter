@@ -1,14 +1,12 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/fangxiusun/ai-adapter/internal/channel"
@@ -43,26 +41,28 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	})
 
 	if result.Error != nil {
+		if result.StatusCode == http.StatusBadRequest {
+			h.logUpstreamHTTPError(reqID, ch, result.Key, model, url, http.StatusBadRequest, http.StatusTooManyRequests, nil, result.ResponseBody, nil, deepLog)
+			h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(result.ResponseBody), deepLog)
+			return nil
+		}
 		h.logger.RequestWarn(reqID, "子渠道并发流式请求失败", "channel_id", ch.Config.ID, "error", result.Error)
-		return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: fanout stream failed: %s", ch.Config.ID, result.Error)}
+		return &FailoverError{StatusCode: result.StatusCode, Message: fmt.Sprintf("channel %s: fanout stream failed: %s", ch.Config.ID, result.Error), AffectsChannelHealth: result.AffectsChannelHealth}
 	}
 
 	resp := result.Response
 	defer resp.Body.Close()
-	h.logChannelResponse(reqID, ch, result.Key, resp.StatusCode, -1, time.Since(start).Milliseconds())
-
-	ch.RecordLatency(result.Key, time.Since(start).Milliseconds())
-	ch.ReportSuccess(result.Key)
+	h.logChannelResponse(reqID, ch, result.Key, resp.StatusCode, -1, result.LatencyMs)
 
 	deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 	upstreamDebug := deepLog.NewUpstreamStreamCapture(resp.StatusCode)
 	defer upstreamDebug.Close()
 	upstreamReader := io.TeeReader(resp.Body, upstreamDebug)
 	capture := newStreamUsageCapture(upstreamReader)
+	if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+		applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+	}
 	flusher := func() {
-		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
-			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
-		}
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -77,20 +77,18 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	defer clientDebug.Close()
 	clientWriter := io.MultiWriter(w, clientDebug)
 
-	switch target {
-	case config.InterfaceChat:
-		io.Copy(clientWriter, capture)
-	case config.InterfaceResponses:
-		respReq, _ := targetReq.(*translate.ResponsesRequest)
-		translate.PipeChatStreamToResponses(r.Context(), capture, clientWriter, respReq, translate.TranslateOpts{ExtractInlineThink: true})
-	case config.InterfaceMessages:
-		translate.PipeChatStreamToClaude(r.Context(), capture, clientWriter, chatReq, flusher)
-	case config.InterfaceGenerateContent:
-		translate.PipeChatStreamToGemini(r.Context(), capture, clientWriter, chatReq, flusher)
+	streamErr := h.pipeChatStreamToTarget(r.Context(), target, capture, clientWriter, chatReq, targetReq, flusher)
+	attemptLatency := time.Since(start).Milliseconds()
+	ch.RecordLatency(result.Key, attemptLatency)
+	if streamErr != nil {
+		ch.ReportStreamError(result.Key)
+		h.logger.RequestWarn(reqID, "并发流式转发失败", "channel_id", ch.Config.ID, "channel_key", result.Key, "error", streamErr)
+		return nil
 	}
+	ch.ReportSuccess(result.Key)
 
 	pt, ct, tt, usageJSON := capture.Usage()
-	h.recordLog(reqID, ch.Config.ID, string(target), string(target), model, model, 200, time.Since(start).Milliseconds(), result.Key, "", "", pt, ct, tt, usageJSON, string(target))
+	h.recordLog(reqID, ch.Config.ID, string(target), string(config.InterfaceChat), model, model, 200, attemptLatency, result.Key, "", "", pt, ct, tt, usageJSON, string(target))
 	return nil
 }
 
@@ -112,16 +110,15 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		return h.fanoutStreamForward(w, r, reqID, ch, target, chatReq, model, sourceBody, path, targetReq, deepLog)
 	}
 	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
+	retryCtx, cancelRetry := rs.withDeadline(r.Context())
+	defer cancelRetry()
 	for {
-		if fe := h.checkRotationAndTimeout(ch, rs, reqID); fe != nil {
+		key, fe := h.nextKey(retryCtx, ch, rs)
+		if fe != nil {
 			return fe
 		}
-		key := h.getNextKey(ch, rs)
-		if key == nil {
-			return &FailoverError{StatusCode: 503, Message: fmt.Sprintf("channel %s: no available keys", ch.Config.ID)}
-		}
 		url := ch.Config.NativeBaseURL(config.InterfaceChat) + path
-		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(sourceBody))
+		httpReq, err := http.NewRequestWithContext(retryCtx, "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
 			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
 			return nil
@@ -134,55 +131,65 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
 		h.logChannelRequest(reqID, ch, key.Value, url, len(sourceBody))
+		attemptStart := time.Now()
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
+			if retryCtx.Err() != nil {
+				return retryContextError(ch, retryCtx.Err(), "upstream request ended")
+			}
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 0)
-			rs.excluded[key.Value] = true
+			rs.noteFailure(0, true)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
+				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error()), AffectsChannelHealth: true}
 			}
 			continue
 		}
-		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, rs.elapsed().Milliseconds())
+		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, time.Since(attemptStart).Milliseconds())
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 401)
-			rs.excluded[key.Value] = true
+			rs.noteFailure(401, false)
 			rs.consecFails = 0
 			continue
 		}
 		if resp.StatusCode == 429 {
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 429)
-			rs.excluded[key.Value] = true
-			time.Sleep(rs.retryDelay)
+			rs.coolDown(key.Value)
+			rs.noteFailure(429, false)
 			continue
 		}
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
-			rs.excluded[key.Value] = true
+			rs.noteFailure(resp.StatusCode, true)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
+				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive upstream failures (last status %d)", ch.Config.ID, rs.consecFails, resp.StatusCode), AffectsChannelHealth: true}
 			}
 			continue
 		}
 		if resp.StatusCode == 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
-			ch.ReportError(key.Value, 400)
-			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusServiceUnavailable, resp.Header, errBodyBytes, readErr, deepLog)
-			h.sendErrorWithDebug(w, reqID, http.StatusServiceUnavailable, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
+			ch.ReportError(key.Value, http.StatusTooManyRequests)
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusTooManyRequests, resp.Header, errBodyBytes, readErr, deepLog)
+			h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
 			return nil
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
-			rs.excluded[key.Value] = true
 			rs.consecFails = 0
+			rs.noteFailure(resp.StatusCode, false)
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, resp.StatusCode, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
@@ -191,10 +198,10 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		upstreamDebug := deepLog.NewUpstreamStreamCapture(resp.StatusCode)
 		upstreamReader := io.TeeReader(resp.Body, upstreamDebug)
 		capture := newStreamUsageCapture(upstreamReader)
+		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
+		}
 		flusher := func() {
-			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
-				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
-			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -206,22 +213,18 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(200)
 		clientDebug := deepLog.NewClientStreamCapture(200)
 		clientWriter := io.MultiWriter(w, clientDebug)
-		switch target {
-		case config.InterfaceChat:
-			io.Copy(clientWriter, capture)
-		case config.InterfaceResponses:
-			respReq, _ := targetReq.(*translate.ResponsesRequest)
-			translate.PipeChatStreamToResponses(r.Context(), capture, clientWriter, respReq, translate.TranslateOpts{ExtractInlineThink: true})
-		case config.InterfaceMessages:
-			translate.PipeChatStreamToClaude(r.Context(), capture, clientWriter, chatReq, flusher)
-		case config.InterfaceGenerateContent:
-			translate.PipeChatStreamToGemini(r.Context(), capture, clientWriter, chatReq, flusher)
-		}
+		streamErr := h.pipeChatStreamToTarget(retryCtx, target, capture, clientWriter, chatReq, targetReq, flusher)
 		upstreamDebug.Close()
 		clientDebug.Close()
 		resp.Body.Close()
 		pt, ct, tt, usageJSON := capture.Usage()
-		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
+		attemptLatency := time.Since(attemptStart).Milliseconds()
+		ch.RecordLatency(key.Value, attemptLatency)
+		if streamErr != nil {
+			ch.ReportStreamError(key.Value)
+			h.logger.RequestWarn(reqID, "流式转换失败", "channel_id", ch.Config.ID, "error", streamErr)
+			return nil
+		}
 		ch.ReportSuccess(key.Value)
 		h.recordLog(reqID, ch.Config.ID, string(target), string(config.InterfaceChat), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		return nil
@@ -241,16 +244,15 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 	}
 	path := upstreamPathForInterface(source, model, true)
 	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
+	retryCtx, cancelRetry := rs.withDeadline(r.Context())
+	defer cancelRetry()
 	for {
-		if fe := h.checkRotationAndTimeout(ch, rs, reqID); fe != nil {
+		key, fe := h.nextKey(retryCtx, ch, rs)
+		if fe != nil {
 			return fe
 		}
-		key := h.getNextKey(ch, rs)
-		if key == nil {
-			return &FailoverError{StatusCode: 503, Message: fmt.Sprintf("channel %s: no available keys", ch.Config.ID)}
-		}
 		url := ch.Config.NativeBaseURL(source) + path
-		httpReq, err := http.NewRequestWithContext(r.Context(), "POST", url, bytes.NewReader(sourceBody))
+		httpReq, err := http.NewRequestWithContext(retryCtx, "POST", url, bytes.NewReader(sourceBody))
 		if err != nil {
 			h.sendError(w, reqID, 500, "create_request_failed", err.Error())
 			return nil
@@ -263,76 +265,76 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		deepLog.LogUpstreamRequestHeader("POST", url, httpReq.Header)
 		deepLog.LogUpstreamRequestBody(sourceBody)
 		h.logChannelRequest(reqID, ch, key.Value, url, len(sourceBody))
+		attemptStart := time.Now()
 		resp, err := ch.HTTPClient().Do(httpReq)
 		if err != nil {
+			if retryCtx.Err() != nil {
+				return retryContextError(ch, retryCtx.Err(), "upstream request ended")
+			}
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 0)
-			rs.excluded[key.Value] = true
+			rs.noteFailure(0, true)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error())}
+				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error()), AffectsChannelHealth: true}
 			}
 			continue
 		}
-		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, rs.elapsed().Milliseconds())
+		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, time.Since(attemptStart).Milliseconds())
 		if resp.StatusCode == 401 {
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 401)
-			rs.excluded[key.Value] = true
+			rs.noteFailure(401, false)
 			rs.consecFails = 0
 			continue
 		}
 		if resp.StatusCode == 429 {
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 429)
-			rs.excluded[key.Value] = true
-			time.Sleep(rs.retryDelay)
+			rs.coolDown(key.Value)
+			rs.noteFailure(429, false)
 			continue
 		}
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
-			rs.excluded[key.Value] = true
+			rs.noteFailure(resp.StatusCode, true)
 			rs.consecFails++
 			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive %d errors", ch.Config.ID, rs.consecFails, resp.StatusCode)}
+				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive upstream failures (last status %d)", ch.Config.ID, rs.consecFails, resp.StatusCode), AffectsChannelHealth: true}
 			}
 			continue
 		}
 		if resp.StatusCode == 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
-			ch.ReportError(key.Value, 400)
-			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusServiceUnavailable, resp.Header, errBodyBytes, readErr, deepLog)
-			h.sendErrorWithDebug(w, reqID, http.StatusServiceUnavailable, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
+			ch.ReportError(key.Value, http.StatusTooManyRequests)
+			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, http.StatusTooManyRequests, resp.Header, errBodyBytes, readErr, deepLog)
+			h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(errBodyBytes), deepLog)
 			return nil
 		}
 		if resp.StatusCode >= 400 {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
+			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
-			rs.excluded[key.Value] = true
 			rs.consecFails = 0
+			rs.noteFailure(resp.StatusCode, false)
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, resp.StatusCode, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
 		}
 
+		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 		upstreamDebug := deepLog.NewUpstreamStreamCapture(resp.StatusCode)
 		upstreamReader := io.TeeReader(resp.Body, upstreamDebug)
-		chatResp, err := h.accumulateStreamToChat(r.Context(), source, upstreamReader, chatReq)
-		upstreamDebug.Close()
-		resp.Body.Close()
-		if err != nil {
-			ch.ReportStreamError(key.Value)
-			rs.excluded[key.Value] = true
-			continue
+		if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
+			applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
 		}
-		ch.RecordLatency(key.Value, rs.elapsed().Milliseconds())
-		ch.ReportSuccess(key.Value)
-		deepLog.LogUpstreamResponseHeader(resp.StatusCode, resp.Header)
 		flusher := func() {
-			if processed := h.processResponseHeaders(ch, model, resp.Header); processed != nil {
-				applyProcessedHeaders(w.Header(), processed, "Content-Type", "Cache-Control", "Connection")
-			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -344,190 +346,111 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(200)
 		clientDebug := deepLog.NewClientStreamCapture(200)
 		clientWriter := io.MultiWriter(w, clientDebug)
-		h.emitStreamResponse(clientWriter, target, chatResp, chatReq, targetReq, flusher)
+		chatResp, streamErr := h.pipeConvertedStream(retryCtx, source, target, upstreamReader, clientWriter, chatReq, targetReq, flusher)
+		upstreamDebug.Close()
 		clientDebug.Close()
+		resp.Body.Close()
+		attemptLatency := time.Since(attemptStart).Milliseconds()
+		ch.RecordLatency(key.Value, attemptLatency)
+		if streamErr != nil {
+			ch.ReportStreamError(key.Value)
+			h.logger.RequestWarn(reqID, "跨协议流式转换失败", "channel_id", ch.Config.ID, "error", streamErr)
+			return nil
+		}
+		ch.ReportSuccess(key.Value)
 		pt, ct, tt, usageJSON := normalizeUsage(chatResp.Usage)
 		h.recordLog(reqID, ch.Config.ID, string(target), string(source), model, model, 200, rs.elapsed().Milliseconds(), key.Value, "", "", pt, ct, tt, usageJSON, string(target))
 		return nil
 	}
 }
 
-// ==================== Stream Accumulation ====================
+type sourceStreamResult struct {
+	response *translate.ChatResponse
+	err      error
+}
 
-func (h *ProxyHandler) accumulateStreamToChat(ctx context.Context, source config.InterfaceType, upstream io.Reader, chatReq *translate.ChatRequest) (*translate.ChatResponse, error) {
+func (h *ProxyHandler) pipeConvertedStream(ctx context.Context, source, target config.InterfaceType, upstream io.Reader, sink io.Writer, chatReq *translate.ChatRequest, targetReq interface{}, flusher func()) (*translate.ChatResponse, error) {
+	if target == config.InterfaceChat {
+		return h.pipeSourceStreamToChat(ctx, source, upstream, sink, chatReq, flusher)
+	}
+
+	chatReader, chatWriter := io.Pipe()
+	sourceDone := make(chan sourceStreamResult, 1)
+	go func() {
+		resp, err := h.pipeSourceStreamToChat(ctx, source, upstream, chatWriter, chatReq, nil)
+		if err != nil {
+			_ = chatWriter.CloseWithError(err)
+		} else {
+			_ = chatWriter.Close()
+		}
+		sourceDone <- sourceStreamResult{response: resp, err: err}
+	}()
+
+	targetErr := h.pipeChatStreamToTarget(ctx, target, chatReader, sink, chatReq, targetReq, flusher)
+	if targetErr != nil {
+		_ = chatReader.CloseWithError(targetErr)
+	} else {
+		_ = chatReader.Close()
+	}
+	sourceResult := <-sourceDone
+	if sourceResult.err != nil {
+		return sourceResult.response, sourceResult.err
+	}
+	if targetErr != nil {
+		return sourceResult.response, targetErr
+	}
+	return sourceResult.response, nil
+}
+
+func (h *ProxyHandler) pipeSourceStreamToChat(ctx context.Context, source config.InterfaceType, upstream io.Reader, sink io.Writer, chatReq *translate.ChatRequest, flusher func()) (*translate.ChatResponse, error) {
 	switch source {
-	case config.InterfaceChat:
-		return h.accumulateChatStream(upstream, chatReq)
 	case config.InterfaceResponses:
-		return translate.PipeResponsesStreamToChat(ctx, upstream, io.Discard, chatReq, translate.TranslateOpts{})
+		return translate.PipeResponsesStreamToChat(ctx, upstream, flushEachWrite(sink, flusher), chatReq, translate.TranslateOpts{})
 	case config.InterfaceMessages:
-		return translate.PipeClaudeStreamToChat(ctx, upstream, io.Discard, chatReq, nil)
+		return translate.PipeClaudeStreamToChat(ctx, upstream, sink, chatReq, flusher)
 	case config.InterfaceGenerateContent:
-		return translate.PipeGeminiStreamToChat(ctx, upstream, io.Discard, chatReq, nil)
+		return translate.PipeGeminiStreamToChat(ctx, upstream, sink, chatReq, flusher)
 	default:
-		return nil, fmt.Errorf("unsupported source: %s", source)
+		return nil, fmt.Errorf("unsupported streaming source: %s", source)
 	}
 }
 
-func (h *ProxyHandler) accumulateChatStream(upstream io.Reader, chatReq *translate.ChatRequest) (*translate.ChatResponse, error) {
-	scanner := bufio.NewScanner(upstream)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	var content, reasoningContent string
-	var toolCalls []translate.ChatToolCall
-	var usage *translate.ChatUsage
-	var model, id string
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-		var chunk translate.ChatStreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-		if chunk.Model != "" {
-			model = chunk.Model
-		}
-		if chunk.ID != "" {
-			id = chunk.ID
-		}
-		if chunk.Usage != nil {
-			usage = chunk.Usage
-		}
-		if len(chunk.Choices) > 0 {
-			delta := chunk.Choices[0].Delta
-			if delta.Content != nil && *delta.Content != "" {
-				content += *delta.Content
-			}
-			if delta.ReasoningContent != nil && *delta.ReasoningContent != "" {
-				reasoningContent += *delta.ReasoningContent
-			}
-			for _, tc := range delta.ToolCalls {
-				if tc.Function != nil && tc.Function.Name != "" {
-					toolCalls = append(toolCalls, translate.ChatToolCall{
-						ID: tc.ID, Type: "function",
-						Function: translate.FunctionCall{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
-					})
-				} else if tc.Function != nil && tc.Function.Arguments != "" && len(toolCalls) > 0 {
-					toolCalls[len(toolCalls)-1].Function.Arguments += tc.Function.Arguments
-				}
-			}
-		}
-	}
-	msg := translate.ChatChoiceMsg{Role: "assistant"}
-	msg.Content = &content
-	if content == "" {
-		s := ""
-		msg.Content = &s
-	}
-	if reasoningContent != "" {
-		msg.ReasoningContent = &reasoningContent
-	}
-	if len(toolCalls) > 0 {
-		msg.ToolCalls = toolCalls
-	}
-	if id == "" {
-		id = "chatcmpl-" + generateRequestID()
-	}
-	if model == "" {
-		model = chatReq.Model
-	}
-	return &translate.ChatResponse{
-		ID: id, Object: "chat.completion", Created: time.Now().Unix(), Model: model,
-		Choices: []translate.ChatChoice{{Index: 0, Message: msg, FinishReason: "stop"}},
-		Usage:   usage,
-	}, nil
-}
-
-// ==================== Stream Emission ====================
-
-func (h *ProxyHandler) emitStreamResponse(w io.Writer, target config.InterfaceType, chatResp *translate.ChatResponse, chatReq *translate.ChatRequest, targetReq interface{}, flusher func()) {
+func (h *ProxyHandler) pipeChatStreamToTarget(ctx context.Context, target config.InterfaceType, upstream io.Reader, sink io.Writer, chatReq *translate.ChatRequest, targetReq interface{}, flusher func()) error {
 	switch target {
 	case config.InterfaceChat:
-		h.emitChatStreamResponse(w, chatResp, flusher)
+		_, err := io.Copy(sink, upstream)
+		return err
 	case config.InterfaceResponses:
-		h.emitResponsesStreamResponse(w, chatResp, chatReq, targetReq, flusher)
+		respReq, _ := targetReq.(*translate.ResponsesRequest)
+		_, err := translate.PipeChatStreamToResponses(ctx, upstream, flushEachWrite(sink, flusher), respReq, translate.TranslateOpts{ExtractInlineThink: true})
+		return err
 	case config.InterfaceMessages:
-		h.emitClaudeStreamResponse(w, chatResp, flusher)
+		_, err := translate.PipeChatStreamToClaude(ctx, upstream, sink, chatReq, flusher)
+		return err
 	case config.InterfaceGenerateContent:
-		h.emitGeminiStreamResponse(w, chatResp, flusher)
+		_, err := translate.PipeChatStreamToGemini(ctx, upstream, sink, chatReq, flusher)
+		return err
+	default:
+		return fmt.Errorf("unsupported streaming target: %s", target)
 	}
 }
 
-func (h *ProxyHandler) emitChatStreamResponse(w io.Writer, resp *translate.ChatResponse, flusher func()) {
-	sw := newSSEWriter(w, flusher)
-	for _, choice := range resp.Choices {
-		chunk := translate.ChatStreamChunk{
-			ID:      resp.ID,
-			Object:  "chat.completion.chunk",
-			Created: resp.Created,
-			Model:   resp.Model,
-			Choices: []translate.ChatStreamChoice{{
-				Index: choice.Index,
-				Delta: translate.ChatStreamDelta{
-					Role:    "assistant",
-					Content: choice.Message.Content,
-				},
-				FinishReason: choice.FinishReason,
-			}},
-		}
-		sw.writeEvent("message", chunk)
-	}
-	sw.writeEvent("done", "[DONE]")
+type flushingWriter struct {
+	sink    io.Writer
+	flusher func()
 }
 
-func (h *ProxyHandler) emitResponsesStreamResponse(w io.Writer, chatResp *translate.ChatResponse, chatReq *translate.ChatRequest, targetReq interface{}, flusher func()) {
-	respReq, _ := targetReq.(*translate.ResponsesRequest)
-	if respReq == nil {
-		respReq = &translate.ResponsesRequest{}
+func (w *flushingWriter) Write(p []byte) (int, error) {
+	n, err := w.sink.Write(p)
+	if err == nil && w.flusher != nil {
+		w.flusher()
 	}
-	sw := newSSEWriter(w, flusher)
-	fullResp := translate.RespToResponses(chatResp, respReq, translate.TranslateOpts{ExtractInlineThink: true})
-	sw.writeEvent("response.created", map[string]interface{}{
-		"type":     "response.created",
-		"response": fullResp,
-	})
-	sw.writeEvent("response.completed", map[string]interface{}{
-		"type":     "response.completed",
-		"response": fullResp,
-	})
+	return n, err
 }
 
-func (h *ProxyHandler) emitClaudeStreamResponse(w io.Writer, chatResp *translate.ChatResponse, flusher func()) {
-	claudeResp := translate.ChatToClaudeResponse(chatResp)
-	sw := newSSEWriter(w, flusher)
-	sw.writeEvent("message_start", map[string]interface{}{"message": claudeResp})
-	for i, block := range claudeResp.Content {
-		sw.writeEvent("content_block_start", map[string]interface{}{"index": i, "content_block": block})
-		switch block.Type {
-		case "text":
-			sw.writeEvent("content_block_delta", map[string]interface{}{
-				"index": i, "delta": map[string]interface{}{"type": "text_delta", "text": block.Text},
-			})
-		case "tool_use":
-			inputJSON, _ := json.Marshal(block.Input)
-			sw.writeEvent("content_block_delta", map[string]interface{}{
-				"index": i, "delta": map[string]interface{}{"type": "input_json_delta", "partial_json": string(inputJSON)},
-			})
-		}
-		sw.writeEvent("content_block_stop", map[string]interface{}{"index": i})
+func flushEachWrite(sink io.Writer, flusher func()) io.Writer {
+	if flusher == nil {
+		return sink
 	}
-	sw.writeEvent("message_delta", map[string]interface{}{
-		"delta": map[string]interface{}{"stop_reason": claudeResp.StopReason},
-		"usage": map[string]interface{}{"output_tokens": claudeResp.Usage.OutputTokens},
-	})
-	sw.writeEvent("message_stop", nil)
-}
-
-func (h *ProxyHandler) emitGeminiStreamResponse(w io.Writer, chatResp *translate.ChatResponse, flusher func()) {
-	geminiResp := translate.ChatToGeminiResponse(chatResp)
-	data, _ := json.Marshal(geminiResp)
-	fmt.Fprintf(w, "%s\n", string(data))
-	if flusher != nil {
-		flusher()
-	}
+	return &flushingWriter{sink: sink, flusher: flusher}
 }

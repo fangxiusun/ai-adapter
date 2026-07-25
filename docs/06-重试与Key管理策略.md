@@ -1,251 +1,156 @@
-# ai-adapter 重试与 Key 管理策略文档
+# ai-adapter 重试与 Key 管理策略
 
-## 1. 概述
+> 更新日期：2026-07-26
+> 参数明细见 [retry-config.md](retry-config.md)，修改前问题与实施边界见 [16-渠道内重试与流式转换处理专项分析.md](16-渠道内重试与流式转换处理专项分析.md)。
 
-ai-adapter 实现了智能的错误处理和重试机制，核心目标是：**尽可能少地将错误抛给用户，在内部通过重试给用户返回正确结果**。
+## 1. 分层模型
 
-## 2. 配置项
+系统包含三层相互独立的容错状态：
 
-所有配置在 `config.yaml` 的 `channels[].retry` 下：
+| 层级 | 状态 | 生命周期 | 用途 |
+|---|---|---|---|
+| 请求内 Key 轮转 | `RetryState` | 单次 Channel dispatch | 完整轮次、429 cooldown、总超时、连续网络/5xx |
+| Key 健康 | `KeyState` | 跨请求，可持久化 | 401 永久跳过、错误计数、暂停、平均延迟 |
+| Channel 健康 | `ChannelHealth` | 跨请求 | 仅按连接错误和上游 5xx 暂停整个渠道 |
+
+外层 `failoverLoop` 负责候选 Channel 切换，内层串行状态机负责同一 Channel 的 Key 轮转。Fanout 是独立的并发竞速模式，不执行串行轮次。
+
+## 2. 完整 Key 轮次
+
+每轮为当前全局可用的 Key 建立候选集合。选择策略先过滤：
+
+- 当前轮已经尝试的 Key；
+- 本请求中仍处于 429 cooldown 的 Key；
+- 跨请求已永久跳过或仍在暂停期的 Key。
+
+一轮内每个 Key 最多尝试一次。当前轮没有候选后，若尚未达到 `max_rotation_rounds`，清空“当前轮已尝试”集合并进入下一轮。5xx 和连接错误 Key 会重新候选；401 Key 不会；429 Key 只有在 cooldown 到期后才会候选。
+
+所有选择策略均遵守同一排除集合：
+
+| `key_strategy` | 选择规则 |
+|---|---|
+| `round-robin` | 轮询 |
+| `random` | 随机 |
+| `least-errors` | 历史错误最少 |
+| `least-latency` | 单 Key attempt 平均延迟最低 |
+| `least-rate-limited` | 最近限流评分最低 |
+
+## 3. 错误决策表
+
+| 上游结果 | 是否换 Key | 是否可进入下一轮 | 是否跨 Channel | ChannelHealth |
+|---|---|---|---|---|
+| 401 | 是 | 否，永久跳过 | Key 耗尽后可 | 不影响 |
+| 429 | 是 | cooldown 到期后可 | 轮次/超时耗尽后可 | 不影响 |
+| 400 | 否 | 否 | 否，直接返回客户端 429 | 不影响 |
+| 403/404/其他 4xx | 否 | 否 | 返回 `FailoverError` 后可 | 不影响 |
+| 5xx | 是 | 是 | 连续失败阈值或轮次耗尽后可 | 计失败 |
+| 连接错误 | 是 | 是 | 与 5xx 相同 | 计失败 |
+| 流解析/写入错误 | 提交 200 前视路径而定；提交后不能 | 否 | 提交 200 后不能 | 不计渠道失败 |
+
+### 3.1 401
+
+401 调用 `On401`：增加 `RequestCount`、401 和总错误计数，并设置 `PermanentlySkipped=true`。它同时把本请求的连续网络/5xx 计数清零，随后选择其他 Key。
+
+恢复永久跳过 Key 需要显式 Resume/状态重置；普通 cooldown 到期不会恢复它。
+
+### 3.2 429
+
+429 不再阻塞整个循环固定 Sleep。当前 Key 加入请求级 cooldown 后，状态机先尝试其他 Key；没有候选时才使用 Context 感知的 timer 等待最早 cooldown 到期。
+
+429 还会累加 Key 的 `ConsecErrors` 和五分钟限流窗口。达到 `consec_error_threshold` 后触发跨请求暂停，暂停时长按线性公式增长。
+
+### 3.3 400
+
+上游 400 保持项目既有业务解释：它被视为上游侧的限流/兼容性错误。客户端收到 HTTP 429，错误代码仍为 `upstream_bad_request`，错误体写入深度日志；Key 侧也按 429 统计。该路径直接结束，不切换 Channel。
+
+### 3.4 其他 4xx
+
+其他 4xx 被视为不能通过同渠道换 Key 解决的错误。记录当前 Key 后立即返回 `FailoverError`。启用多 Channel Failover 时外层可尝试下一渠道，但这些错误不会累计 ChannelHealth。
+
+### 3.5 5xx 与连接错误
+
+当前 Key 只在本轮标记为已尝试，状态机立即选择下一 Key；下一轮可以再次使用。两者增加请求级 `consecFails`，达到 `failover.consecutive_fail_threshold` 时可在完整轮次结束前提前切换 Channel。
+
+只有这两类明确设置 `FailoverError.AffectsChannelHealth=true`。
+
+## 4. Key 暂停与恢复
+
+除 401 外的错误通过统一计数逻辑增加 `ConsecErrors`：
+
+```text
+pause_seconds = (ConsecErrors - threshold + 1) * pause_multiplier_sec
+pause_seconds = min(pause_seconds, pause_max_sec)
+```
+
+达到阈值的当次错误立即触发暂停。成功请求会：
+
+- 增加 `RequestCount`；
+- 清零 `ConsecErrors`；
+- 清除 `Paused` 和 `PauseUntil`；
+- 更新 `LastSuccessTime`。
+
+## 5. 超时
+
+渠道内状态机使用 `max_total_wait_ms` 创建 Context deadline，可中断 HTTP 请求、响应读取和 429 等待。外层还有 `failover.total_timeout_ms`，Channel HTTP client 还有 `request_timeout_ms`，三者以最先到期者为准。
+
+实时流已经向客户端提交 HTTP 200 后，任何解析、网络或写入错误都只能终止当前流，不能切换 Key 后重新发送，否则会在同一响应中混入两次生成结果。
+
+## 6. 延迟和请求计数
+
+系统端到端延迟从 Handler 接受请求开始，到响应处理完成结束，用于请求日志和汇总指标。
+
+Key attempt 延迟只覆盖某个 Key 的单次 HTTP 调用及该次响应处理，用于 Key 平均延迟和 `least-latency`。每个成功或失败 attempt 都先记录延迟，再由 `ReportSuccess` / `ReportError` 增加一次 `RequestCount`，使平均值分子和分母一致。
+
+Fanout 每个并发 attempt 单独统计；赢家取消导致的落选请求不记错误。
+
+## 7. 流式处理
+
+跨协议流使用实时增量转换，不再完整缓存后伪造流：
+
+```text
+source SSE -> Chat SSE -> target SSE
+```
+
+中间通过 `io.Pipe` 提供背压。解析器检查非法 JSON、Scanner 错误、Context、终止事件和下游写入错误；失败调用 `ReportStreamError`，不会调用 `ReportSuccess`。
+
+原生同协议流是透明复制，只校验 `io.Copy` 的传输结果，不解析协议终止事件。
+
+## 8. Fanout
+
+Fanout 在同一时间向多个 Key 发请求：
+
+- `wait_all=false` 返回第一个完整非流式 2xx，或第一个流式 2xx 响应头。
+- `wait_all=true` 仅用于非流式，等待全部完成后选择最快 2xx。
+- 流式赢家直到 Body 完整复制/转换后才记成功。
+- 每个流请求有独立 Context，取消落选请求不会取消赢家 Body。
+- 400 同样对客户端和 Key 映射为 429。
+
+Fanout 不使用 `max_rotation_rounds` 和请求级 429 cooldown。需要严格串行轮转语义时应关闭 Fanout。
+
+## 9. 配置示例
 
 ```yaml
 channels:
-  - id: "mimo"
+  - id: mimo
+    key_strategy: round-robin
+    request_timeout_ms: 60000
     retry:
-      retry_delay_429_ms: 1000        # 429 重试延迟 (ms)
-      max_rotation_rounds: 3          # 最大轮转轮数
-      max_total_wait_ms: 30000        # 最大总等待时间 (ms)
-      consec_error_threshold: 3       # 自动暂停的连续错误阈值
-      pause_multiplier_sec: 30        # 暂停时间倍数 (秒)
-      pause_max_sec: 600              # 暂停最大时间 (秒)
+      retry_delay_429_ms: 1000
+      max_rotation_rounds: 3
+      max_total_wait_ms: 30000
+      consec_error_threshold: 3
+      pause_multiplier_sec: 30
+      pause_max_sec: 600
+
+failover:
+  enabled: true
+  max_channel_attempts: 3
+  total_timeout_ms: 120000
+  consecutive_fail_threshold: 2
 ```
 
-### 2.1 配置项说明
+`consecutive_fail_threshold=2` 表示连续两次网络/5xx 即可提前切换 Channel。如果目标是至少尝试完一轮全部 Key，应把它调到不小于渠道可用 Key 数量。
 
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `retry_delay_429_ms` | 1000 | 收到 429 后等待的时间（ms），然后切换到下一个 key |
-| `max_rotation_rounds` | 3 | 所有 key 都返回 429 时，从头重新轮转的最大次数 |
-| `max_total_wait_ms` | 30000 | 最大总等待时间（ms），超时返回最后一个响应给客户端 |
-| `consec_error_threshold` | 3 | 连续错误达到此次数时自动暂停 key |
-| `pause_multiplier_sec` | 30 | 暂停时间计算倍数（秒） |
-| `pause_max_sec` | 600 | 暂停时间上限（秒） |
+## 10. 兼容说明
 
-## 3. 重试策略详解
-
-### 3.1 401 错误处理
-
-```
-收到 401 → 永久跳过该 key → 切换到下一个 key → 不重试同一 key
-```
-
-- **行为**：该 key 被标记为 `PermanentlySkipped`，后续所有请求都不会使用它
-- **日志**：明文打印 key 名称和值（便于排查）
-- **恢复**：需手动在 Web UI 中 Resume 或重启代理
-
-### 3.2 429 错误处理
-
-```
-收到 429 → 跳过当前 key → 等待 retry_delay_429_ms → 切换到下一个 key → 重试
-```
-
-**延迟**：固定为 `retry_delay_429_ms`（默认 1000ms）
-
-**轮转逻辑**：
-1. 收到 429 → 跳过当前 key → 等待 → 切换到下一个 key
-2. 如果所有 key 都被跳过 → 开始新的轮转轮次（rotationRound++）
-3. 如果轮转轮次超过 `max_rotation_rounds` → 返回 503 错误
-4. 如果总等待时间超过 `max_total_wait_ms` → 返回超时错误
-
-### 3.3 400/403/404 错误处理
-
-```
-收到 400/403/404 → 跳过当前 key → 切换到下一个 key → 立即重试
-```
-
-- **行为**：与 5xx 类似，跳过当前 key 并切换到下一个 key
-- **统计**：分别记录到 `error_400`、`error_403`、`error_404` 计数器
-- **暂停机制**：这些错误也会计入连续错误计数，触发自动暂停
-
-### 3.4 5xx 错误处理
-
-```
-收到 5xx → 跳过当前 key → 切换到下一个 key → 不等待直接重试
-```
-
-### 3.5 流式解析错误
-
-流式响应解析失败时，记录到 `error_stream` 计数器，并触发与其他错误相同的暂停机制。
-
-### 3.6 自动暂停机制
-
-当某个 key 的连续错误次数达到 `consec_error_threshold` 时：
-
-```
-暂停时间 = (连续错误数 - 阈值 + 1) × pause_multiplier_sec
-```
-
-**示例**（默认配置：threshold=3, multiplier=30s, max=600s）：
-
-| 连续错误数 | 暂停时间 |
-|-----------|----------|
-| 3 | 30 秒 |
-| 4 | 60 秒 |
-| 5 | 90 秒 |
-| 6 | 120 秒 |
-| ... | ... |
-| 23+ | 600 秒（上限） |
-
-### 3.7 429 暂停机制
-
-429 错误也会触发暂停，但使用相同的 `consec_error_threshold` 和 `pause_multiplier_sec`：
-
-```
-连续 429 错误 ≥ threshold → 暂停该 key
-```
-
-## 4. 轮转与超时
-
-### 4.1 轮转逻辑
-
-```
-第 1 轮：尝试所有 key（排除已失败的）
-  ↓ 所有 key 都失败
-第 2 轮：重置排除列表，重新尝试所有 key
-  ↓ 所有 key 都失败
-第 3 轮：重置排除列表，重新尝试所有 key
-  ↓ 所有 key 都失败
-返回 503 错误
-```
-
-**配置**：`max_rotation_rounds`（默认 3）
-
-### 4.2 超时机制
-
-```
-请求开始 → 记录 start 时间
-  ↓ 每次重试检查
-  if (now - start) ≥ max_total_wait_ms:
-    返回超时错误
-  ↓
-继续重试
-```
-
-**配置**：`max_total_wait_ms`（默认 30000ms = 30秒）
-
-## 5. 完整流程图
-
-```
-请求进来
-  │
-  ▼
-获取下一个可用 key
-  │
-  ├── key == nil → 返回 503 (no_available_keys)
-  │
-  ▼
-发送上游请求
-  │
-  ├── 成功 (2xx) → 返回结果 ✓
-  │
-  ├── 401 → 永久跳过 key → 获取下一个 key → 循环
-  │
-  ├── 429 → 跳过 key → 等待 retry_delay_429_ms → 获取下一个 key
-  │         │
-  │         ├── 所有 key 都跳过 → 轮转轮次++
-  │         │   │
-  │         │   ├── 轮次 ≤ max_rotation_rounds → 重置排除列表 → 循环
-  │         │   └── 轮次 > max_rotation_rounds → 返回 503
-  │         │
-  │         └── 检查超时 → 超时 → 返回 502 (timeout)
-  │
-  ├── 5xx → 跳过 key → 获取下一个 key → 循环
-  │
-  └── 网络错误 → 跳过 key → 获取下一个 key → 循环
-```
-
-## 5. Key 选择策略
-
-系统支持五种 Key 选择策略，通过 `key_strategy` 配置：
-
-| 策略 | 说明 |
-|------|------|
-| `round-robin` | 轮询（默认） |
-| `random` | 随机选择 |
-| `least-errors` | 选择错误数最少的 Key |
-| `least-latency` | 选择平均延迟最低的 Key |
-| `least-rate-limited` | 选择被限流次数最少的 Key |
-
-## 6. 配置示例
-
-### 6.1 保守策略（默认）
-
-```yaml
-retry:
-  retry_delay_429_ms: 1000        # 等待 1 秒
-  max_rotation_rounds: 3          # 最多 3 轮
-  max_total_wait_ms: 30000        # 最多等 30 秒
-  consec_error_threshold: 3       # 连续 3 次错误暂停
-  pause_multiplier_sec: 30        # 暂停 30 秒起
-  pause_max_sec: 600              # 最多暂停 10 分钟
-```
-
-### 6.2 激进策略（快速失败）
-
-```yaml
-retry:
-  retry_delay_429_ms: 500         # 等待 0.5 秒
-  max_rotation_rounds: 1          # 只轮转 1 轮
-  max_total_wait_ms: 5000         # 最多等 5 秒
-  consec_error_threshold: 2       # 连续 2 次错误就暂停
-  pause_multiplier_sec: 10        # 暂停 10 秒起
-  pause_max_sec: 120              # 最多暂停 2 分钟
-```
-
-### 6.3 宽容策略（高可用）
-
-```yaml
-retry:
-  retry_delay_429_ms: 2000        # 等待 2 秒
-  max_rotation_rounds: 5          # 最多 5 轮
-  max_total_wait_ms: 60000        # 最多等 60 秒
-  consec_error_threshold: 5       # 连续 5 次错误才暂停
-  pause_multiplier_sec: 60        # 暂停 60 秒起
-  pause_max_sec: 1800             # 最多暂停 30 分钟
-```
-
-## 7. 日志说明
-
-### 7.1 401 日志
-
-```
-WARN key permanently skipped (401) channel=mimo key_name=主 key key_value=sk-xxx reason=401 Unauthorized
-```
-
-### 7.2 429 日志
-
-```
-WARN key rate limited (429) channel=mimo key_name=主 key rate_limit_count=3
-WARN key rate limited (429), retrying request_id=req_xxx key_name=主 key delay=1s
-```
-
-### 7.3 轮转日志
-
-```
-WARN all keys excluded, starting new rotation round round=2 max_rounds=3
-```
-
-### 7.4 超时日志
-
-```
-ERROR all retries failed request_id=req_xxx code=all_retries_failed message=all 3 rotation rounds exhausted
-ERROR all retries failed request_id=req_xxx code=timeout message=max total wait time 30s exceeded
-```
-
-## 8. 错误响应
-
-| 错误代码 | HTTP 状态码 | 说明 |
-|----------|------------|------|
-| `no_available_keys` | 503 | 所有 key 都不可用（401 永久跳过 + 暂停） |
-| `all_retries_failed` | 502 | 所有轮转轮次都失败 |
-| `timeout` | 502 | 超过最大总等待时间 |
+旧字段 `max_retries` 和 `retry_delay_ms` 不参与当前渠道内轮转状态机，仍保留仅用于配置兼容。429 当前不解析 `Retry-After`，使用固定的 `retry_delay_429_ms`。

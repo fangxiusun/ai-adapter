@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"strings"
 	"time"
 )
@@ -17,6 +16,7 @@ type StreamTranslator struct {
 	req     *ResponsesRequest
 	opts    TranslateOpts
 	flusher func()
+	err     error
 }
 
 type streamState struct {
@@ -379,76 +379,193 @@ func (st *StreamTranslator) buildSnapshot(status string) *ResponsesObject {
 }
 
 func (st *StreamTranslator) emit(event string, data map[string]interface{}) {
+	if st.err != nil {
+		return
+	}
 	data["type"] = event
 	data["sequence_number"] = st.state.seqNum
 	st.state.seqNum++
-
-	payload, _ := json.Marshal(data)
-	fmt.Fprintf(st.sink, "event: %s\ndata: %s\n\n", event, string(payload))
-	if st.flusher != nil {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		st.err = err
+		return
+	}
+	_, st.err = fmt.Fprintf(st.sink, "event: %s\ndata: %s\n\n", event, payload)
+	if st.err == nil && st.flusher != nil {
 		st.flusher()
 	}
 }
 
+func (st *StreamTranslator) Err() error {
+	return st.err
+}
+
 func PipeChatStreamToResponses(ctx context.Context, upstream io.Reader, sink io.Writer, req *ResponsesRequest, opts TranslateOpts) (*StreamResult, error) {
+	if req == nil {
+		req = &ResponsesRequest{}
+	}
 	translator := NewStreamTranslator(sink, req, opts, nil)
 	translator.Start()
+	if err := translator.Err(); err != nil {
+		return nil, err
+	}
 
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
+	terminal := false
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return translator.FinishWithError(err), err
+		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			terminal = true
 			break
 		}
 
 		var chunk ChatStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			parseErr := fmt.Errorf("parse chat SSE chunk: %w", err)
+			return translator.FinishWithError(parseErr), parseErr
 		}
 		translator.ProcessChunk(&chunk)
+		if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
+			terminal = true
+		}
+		if err := translator.Err(); err != nil {
+			return nil, err
+		}
 	}
-
+	if err := scanner.Err(); err != nil {
+		return translator.FinishWithError(err), err
+	}
+	if !terminal {
+		err := fmt.Errorf("chat SSE ended before a terminal event")
+		return translator.FinishWithError(err), err
+	}
 	result := translator.Finish()
-	return result, nil
+	return result, translator.Err()
 }
 
 func PipeResponsesStreamToChat(ctx context.Context, upstream io.Reader, sink io.Writer, req *ChatRequest, opts TranslateOpts) (*ChatResponse, error) {
+	if req == nil {
+		req = &ChatRequest{}
+	}
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
 	state := newResponsesStreamToChatState(req.Model)
+	w := newSSEWriter(sink, nil)
+	terminal := false
+	emittedContent := false
+	emittedReasoning := false
+	emittedToolCalls := make(map[string]bool)
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event: ") {
-			continue
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			terminal = true
 			break
 		}
 
 		var raw map[string]interface{}
 		if err := json.Unmarshal([]byte(data), &raw); err != nil {
-			slog.Warn("sse_parse_failed", "error", err, "data", truncateString(data, 200))
-			continue
+			return nil, fmt.Errorf("parse Responses SSE event: %w", err)
+		}
+		eventType, _ := raw["type"].(string)
+		if eventType == "response.failed" || eventType == "error" {
+			return nil, fmt.Errorf("Responses stream returned %s", eventType)
 		}
 		state.process(raw)
+		if state.id == "" {
+			state.id = "chatcmpl-" + generateID()
+		}
+		switch eventType {
+		case "response.output_text.delta":
+			delta, _ := raw["delta"].(string)
+			emitChatChunk(w, state.id, state.model, &delta, nil, "", nil)
+			emittedContent = emittedContent || delta != ""
+		case "response.reasoning_summary_text.delta":
+			delta, _ := raw["delta"].(string)
+			emitChatChunk(w, state.id, state.model, nil, &delta, "", nil)
+			emittedReasoning = emittedReasoning || delta != ""
+		case "response.output_item.added":
+			if item, ok := raw["item"].(map[string]interface{}); ok {
+				if itemType, _ := item["type"].(string); itemType == "function_call" {
+					index := intFromRaw(raw["output_index"])
+					callID, _ := item["call_id"].(string)
+					name, _ := item["name"].(string)
+					emitChatToolChunk(w, state.id, state.model, index, callID, "function", name, "")
+					emittedToolCalls[callID] = true
+				}
+			}
+		case "response.function_call_arguments.delta":
+			item := state.itemForEvent(raw)
+			if item != nil {
+				delta, _ := raw["delta"].(string)
+				emitChatToolChunk(w, state.id, state.model, intFromRaw(raw["output_index"]), item.callID, "", item.name, delta)
+				emittedToolCalls[item.callID] = true
+			}
+		case "response.completed":
+			terminal = true
+			completed := state.build()
+			message := completed.Choices[0].Message
+			if !emittedReasoning && message.ReasoningContent != nil && *message.ReasoningContent != "" {
+				emitChatChunk(w, completed.ID, completed.Model, nil, message.ReasoningContent, "", nil)
+			}
+			if !emittedContent && message.Content != nil && *message.Content != "" {
+				emitChatChunk(w, completed.ID, completed.Model, message.Content, nil, "", nil)
+			}
+			for index, toolCall := range message.ToolCalls {
+				if emittedToolCalls[toolCall.ID] {
+					continue
+				}
+				emitChatToolChunk(w, completed.ID, completed.Model, index, toolCall.ID, "function", toolCall.Function.Name, toolCall.Function.Arguments)
+			}
+		}
+		if err := w.Err(); err != nil {
+			return nil, err
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+	if !terminal {
+		return nil, fmt.Errorf("Responses stream ended before response.completed")
+	}
+	resp := state.build()
+	finishChunk := ChatStreamChunk{
+		ID: resp.ID, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: resp.Model,
+		Choices: []ChatStreamChoice{{Index: 0, Delta: ChatStreamDelta{}, FinishReason: resp.Choices[0].FinishReason}},
+		Usage:   resp.Usage,
+	}
+	w.writeData(finishChunk)
+	w.writeDone()
+	if err := w.Err(); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
 
-	return state.build(), nil
+func intFromRaw(value interface{}) int {
+	switch n := value.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	default:
+		return 0
+	}
 }
 
 type responsesStreamToChatState struct {

@@ -241,29 +241,46 @@ func GeminiToChatResponse(resp *GeminiResponse) *ChatResponse {
 
 // PipeChatStreamToGemini converts OpenAI Chat SSE stream to Gemini JSON stream.
 func PipeChatStreamToGemini(ctx context.Context, upstream io.Reader, sink io.Writer, req *ChatRequest, flusher func()) (*GeminiResponse, error) {
-	state := &geminiStreamState{
-		model: req.Model,
+	if req == nil {
+		req = &ChatRequest{}
 	}
-
+	state := &geminiStreamState{model: req.Model}
+	w := newSSEWriter(sink, flusher)
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	terminal := false
 
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			terminal = true
 			break
 		}
 		var chunk ChatStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			return nil, fmt.Errorf("parse chat SSE chunk: %w", err)
 		}
-		processChatChunkToGemini(sink, state, &chunk, flusher)
+		processChatChunkToGemini(w, state, &chunk)
+		if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
+			terminal = true
+		}
+		if err := w.Err(); err != nil {
+			return nil, err
+		}
 	}
-
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if !terminal {
+		return nil, fmt.Errorf("chat SSE ended before a terminal event")
+	}
 	return state.buildResponse(), nil
 }
 
@@ -281,7 +298,7 @@ type geminiToolCallState struct {
 	argsJSON string
 }
 
-func processChatChunkToGemini(sink io.Writer, st *geminiStreamState, chunk *ChatStreamChunk, flusher func()) {
+func processChatChunkToGemini(w *sseWriter, st *geminiStreamState, chunk *ChatStreamChunk) {
 	if chunk.Usage != nil {
 		st.inputTokens = chunk.Usage.PromptTokens
 		st.outputTokens = chunk.Usage.CompletionTokens
@@ -301,11 +318,7 @@ func processChatChunkToGemini(sink io.Writer, st *geminiStreamState, chunk *Chat
 				},
 			}},
 		}
-		data, _ := json.Marshal(geminiResp)
-		fmt.Fprintf(sink, "%s\n", string(data))
-		if flusher != nil {
-			flusher()
-		}
+		w.writeData(geminiResp)
 	}
 
 	for _, tc := range delta.ToolCalls {
@@ -359,29 +372,56 @@ func (st *geminiStreamState) buildResponse() *GeminiResponse {
 
 // PipeGeminiStreamToChat converts Gemini JSON stream to OpenAI Chat SSE stream.
 func PipeGeminiStreamToChat(ctx context.Context, upstream io.Reader, sink io.Writer, req *ChatRequest, flusher func()) (*ChatResponse, error) {
+	if req == nil {
+		req = &ChatRequest{}
+	}
 	w := newSSEWriter(sink, flusher)
 	state := &chatFromGeminiStreamState{}
-
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	terminal := false
+	seenChunk := false
 
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "event: ") {
 			continue
+		}
+		if strings.HasPrefix(line, "data: ") {
+			line = strings.TrimPrefix(line, "data: ")
+		}
+		if line == "[DONE]" {
+			terminal = true
+			break
 		}
 		var chunk GeminiStreamChunk
 		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-			continue
+			return nil, fmt.Errorf("parse Gemini stream chunk: %w", err)
 		}
+		seenChunk = true
 		processGeminiChunkToChat(w, state, &chunk, req.Model)
+		for _, candidate := range chunk.Candidates {
+			if candidate.FinishReason != "" {
+				terminal = true
+			}
+		}
+		if err := w.Err(); err != nil {
+			return nil, err
+		}
 	}
-
-	fmt.Fprintf(sink, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher()
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
-
+	if !seenChunk || !terminal {
+		return nil, fmt.Errorf("Gemini stream ended before a terminal chunk")
+	}
+	w.writeDone()
+	if err := w.Err(); err != nil {
+		return nil, err
+	}
 	return state.buildResponse(req.Model), nil
 }
 

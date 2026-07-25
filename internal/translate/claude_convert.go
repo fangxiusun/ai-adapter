@@ -259,49 +259,63 @@ func ClaudeToChatResponse(resp *ClaudeResponse) *ChatResponse {
 
 // PipeChatStreamToClaude converts OpenAI Chat SSE stream to Claude SSE stream.
 func PipeChatStreamToClaude(ctx context.Context, upstream io.Reader, sink io.Writer, req *ChatRequest, flusher func()) (*ClaudeResponse, error) {
+	if req == nil {
+		req = &ChatRequest{}
+	}
 	w := newSSEWriter(sink, flusher)
 	state := &claudeStreamState{
 		responseID: generateID(),
 		model:      req.Model,
 	}
 
-	// Emit message_start.
 	startResp := &ClaudeResponse{
-		ID:      state.responseID,
-		Type:    "message",
-		Role:    "assistant",
-		Model:   state.model,
-		Content: []ClaudeContentBlock{},
-		Usage:   ClaudeUsage{},
+		ID: state.responseID, Type: "message", Role: "assistant", Model: state.model,
+		Content: []ClaudeContentBlock{}, Usage: ClaudeUsage{},
 	}
 	w.writeEvent("message_start", map[string]interface{}{"message": startResp})
+	if err := w.Err(); err != nil {
+		return nil, err
+	}
 
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
+	terminal := false
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			terminal = true
 			break
 		}
 		var chunk ChatStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			return nil, fmt.Errorf("parse chat SSE chunk: %w", err)
 		}
 		processChatChunkToClaude(w, state, &chunk)
+		if len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != "" {
+			terminal = true
+		}
+		if err := w.Err(); err != nil {
+			return nil, err
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if !terminal {
+		return nil, fmt.Errorf("chat SSE ended before a terminal event")
 	}
 
-	// Finalize any open block.
 	if state.blockOpen {
 		w.writeEvent("content_block_stop", map[string]interface{}{"index": state.blockIndex})
 		state.blockOpen = false
 	}
-
-	// Emit message_delta and message_stop.
 	stopReason := "end_turn"
 	if state.finishReason != "" {
 		stopReason = chatFinishToClaudeStop(state.finishReason)
@@ -311,15 +325,14 @@ func PipeChatStreamToClaude(ctx context.Context, upstream io.Reader, sink io.Wri
 		"usage": map[string]interface{}{"output_tokens": state.outputTokens},
 	})
 	w.writeEvent("message_stop", nil)
+	if err := w.Err(); err != nil {
+		return nil, err
+	}
 
 	return &ClaudeResponse{
-		ID:         state.responseID,
-		Type:       "message",
-		Role:       "assistant",
-		Model:      state.model,
-		Content:    state.finalContent,
-		StopReason: stopReason,
-		Usage:      ClaudeUsage{InputTokens: state.inputTokens, OutputTokens: state.outputTokens},
+		ID: state.responseID, Type: "message", Role: "assistant", Model: state.model,
+		Content: state.finalContent, StopReason: stopReason,
+		Usage: ClaudeUsage{InputTokens: state.inputTokens, OutputTokens: state.outputTokens},
 	}, nil
 }
 
@@ -427,36 +440,52 @@ func closeBlock(w *sseWriter, st *claudeStreamState) {
 
 // PipeClaudeStreamToChat converts Claude SSE stream to OpenAI Chat SSE stream.
 func PipeClaudeStreamToChat(ctx context.Context, upstream io.Reader, sink io.Writer, req *ChatRequest, flusher func()) (*ChatResponse, error) {
-	w := newSSEWriter(sink, flusher)
-	state := &chatFromClaudeStreamState{
-		toolCalls: make(map[int]*toolCallAccumulator),
+	if req == nil {
+		req = &ChatRequest{}
 	}
-
+	w := newSSEWriter(sink, flusher)
+	state := &chatFromClaudeStreamState{toolCalls: make(map[int]*toolCallAccumulator)}
 	scanner := bufio.NewScanner(upstream)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	terminal := false
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event: ") {
-			continue
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		var event ClaudeStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
+			return nil, fmt.Errorf("parse Claude SSE event: %w", err)
+		}
+		if event.Type == "error" {
+			if event.Error != nil {
+				return nil, fmt.Errorf("Claude stream error: %s", event.Error.Message)
+			}
+			return nil, fmt.Errorf("Claude stream returned an error event")
 		}
 		processClaudeEventToChat(w, state, &event, req.Model)
+		if event.Type == "message_stop" {
+			terminal = true
+		}
+		if err := w.Err(); err != nil {
+			return nil, err
+		}
 	}
-
-	// Emit [DONE].
-	fmt.Fprintf(sink, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher()
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
-
+	if !terminal {
+		return nil, fmt.Errorf("Claude stream ended before message_stop")
+	}
+	w.writeDone()
+	if err := w.Err(); err != nil {
+		return nil, err
+	}
 	return state.buildResponse(req.Model), nil
 }
 
@@ -524,22 +553,12 @@ func processClaudeEventToChat(w *sseWriter, st *chatFromClaudeStreamState, event
 
 func emitChatChunk(w *sseWriter, id, model string, content *string, reasoningContent *string, toolCallID string, toolCalls []ToolCallDelta) {
 	chunk := ChatStreamChunk{
-		ID:      id,
-		Object:  "chat.completion.chunk",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []ChatStreamChoice{{
-			Index: 0,
-			Delta: ChatStreamDelta{
-				Content:          content,
-				ReasoningContent: reasoningContent,
-				ToolCalls:        toolCalls,
-			},
-		}},
+		ID: id, Object: "chat.completion.chunk", Created: time.Now().Unix(), Model: model,
+		Choices: []ChatStreamChoice{{Index: 0, Delta: ChatStreamDelta{
+			Content: content, ReasoningContent: reasoningContent, ToolCalls: toolCalls,
+		}}},
 	}
-	data, _ := json.Marshal(chunk)
-	fmt.Fprintf(w.sink, "data: %s\n\n", string(data))
-	w.flush()
+	w.writeData(chunk)
 }
 
 func emitChatToolChunk(w *sseWriter, id, model string, index int, callID, typeName, name, args string) {
@@ -599,6 +618,7 @@ func (st *chatFromClaudeStreamState) buildResponse(model string) *ChatResponse {
 type sseWriter struct {
 	sink    io.Writer
 	flusher func()
+	err     error
 }
 
 func newSSEWriter(sink io.Writer, flusher func()) *sseWriter {
@@ -606,19 +626,48 @@ func newSSEWriter(sink io.Writer, flusher func()) *sseWriter {
 }
 
 func (w *sseWriter) writeEvent(event string, data interface{}) {
-	if data != nil {
-		payload, _ := json.Marshal(data)
-		fmt.Fprintf(w.sink, "event: %s\ndata: %s\n\n", event, string(payload))
-	} else {
-		fmt.Fprintf(w.sink, "event: %s\ndata: {}\n\n", event)
+	if w.err != nil {
+		return
 	}
+	payload := []byte("{}")
+	if data != nil {
+		payload, w.err = json.Marshal(data)
+		if w.err != nil {
+			return
+		}
+	}
+	_, w.err = fmt.Fprintf(w.sink, "event: %s\ndata: %s\n\n", event, payload)
 	w.flush()
 }
 
+func (w *sseWriter) writeData(data interface{}) {
+	if w.err != nil {
+		return
+	}
+	payload, err := json.Marshal(data)
+	if err != nil {
+		w.err = err
+		return
+	}
+	_, w.err = fmt.Fprintf(w.sink, "data: %s\n\n", payload)
+	w.flush()
+}
+
+func (w *sseWriter) writeDone() {
+	if w.err == nil {
+		_, w.err = fmt.Fprint(w.sink, "data: [DONE]\n\n")
+		w.flush()
+	}
+}
+
 func (w *sseWriter) flush() {
-	if w.flusher != nil {
+	if w.err == nil && w.flusher != nil {
 		w.flusher()
 	}
+}
+
+func (w *sseWriter) Err() error {
+	return w.err
 }
 
 // ==================== Helper Functions ====================

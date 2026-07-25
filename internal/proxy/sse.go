@@ -3,48 +3,20 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 )
-
-// ==================== SSE Writer ====================
-
-type sseWriter struct {
-	sink    io.Writer
-	flusher func()
-}
-
-func newSSEWriter(sink io.Writer, flusher func()) *sseWriter {
-	return &sseWriter{sink: sink, flusher: flusher}
-}
-
-func (w *sseWriter) writeEvent(event string, data interface{}) {
-	if data != nil {
-		payload, _ := json.Marshal(data)
-		fmt.Fprintf(w.sink, "event: %s\ndata: %s\n\n", event, string(payload))
-	} else {
-		fmt.Fprintf(w.sink, "event: %s\ndata: {}\n\n", event)
-	}
-	w.flush()
-}
-
-func (w *sseWriter) flush() {
-	if w.flusher != nil {
-		w.flusher()
-	}
-}
 
 // ==================== Stream Usage Capture ====================
 
 // streamUsageCapture wraps an io.Reader to intercept SSE data lines and capture
 // usage information from the last chunk. All data is passed through unchanged.
 type streamUsageCapture struct {
-	reader         io.Reader
-	promptTokens   int
+	reader           io.Reader
+	promptTokens     int
 	completionTokens int
-	totalTokens    int
-	usageJSON      string
-	lineBuf        []byte // buffer for partial line data
+	totalTokens      int
+	usageJSON        string
+	lineBuf          []byte // buffer for partial line data
 }
 
 func newStreamUsageCapture(reader io.Reader) *streamUsageCapture {

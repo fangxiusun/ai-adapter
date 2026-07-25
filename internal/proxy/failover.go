@@ -5,8 +5,9 @@ import "fmt"
 // FailoverError represents an error that may trigger cross-channel failover.
 // If the dispatch loop receives a FailoverError, it tries the next candidate channel.
 type FailoverError struct {
-	StatusCode int    // upstream HTTP status code; 0 means connection failure
-	Message    string // human-readable description
+	StatusCode           int    // upstream HTTP status code; 0 means connection failure
+	Message              string // human-readable description
+	AffectsChannelHealth bool   // only upstream 5xx and connection failures set this
 }
 
 func (e *FailoverError) Error() string {

@@ -79,6 +79,8 @@ func (ks *KeyState) OnSuccess() {
 	defer ks.mu.Unlock()
 	ks.RequestCount++
 	ks.ConsecErrors = 0
+	ks.Paused = false
+	ks.PauseUntil = time.Time{}
 	ks.LastSuccessTime = time.Now()
 }
 
@@ -89,6 +91,7 @@ func (ks *KeyState) On400() {
 func (ks *KeyState) On401() {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
+	ks.RequestCount++
 	ks.PermanentlySkipped = true
 	ks.Error401++
 	ks.ErrorCount++
@@ -126,6 +129,7 @@ func (ks *KeyState) On429() {
 	ks.RateLimitWindow = valid
 	ks.RateLimitCount = len(valid)
 
+	ks.ConsecErrors++
 	if ks.ConsecErrors >= ks.consecThreshold {
 		pauseSec := (ks.ConsecErrors - ks.consecThreshold + 1) * ks.pauseMultiplierSec
 		pauseDuration := time.Duration(pauseSec) * time.Second
@@ -136,7 +140,6 @@ func (ks *KeyState) On429() {
 		ks.Paused = true
 		ks.PauseUntil = now.Add(pauseDuration)
 	}
-	ks.ConsecErrors++
 }
 
 func (ks *KeyState) OnError4xx() {
