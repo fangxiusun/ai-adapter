@@ -4,29 +4,29 @@
 > 执行状态机：`internal/proxy/retry.go`
 > 更新日期：2026-07-26
 
-`channels[].retry` 控制单个 Channel 内的 Key 健康与串行轮转。Fanout 是并发竞速模式，不执行串行轮次，因此 `max_rotation_rounds` 和请求级 429 cooldown 不适用于已开启 Fanout 的请求。
+`channels[].retry` 控制 Key 健康与请求级完整轮次。全局执行器按 Channel 交错选择 Key。Fanout 是并发竞速模式，不执行串行轮次。
 
 ## 参数总览
 
 | YAML 配置 | 默认值 | 作用 |
 |---|---:|---|
 | `retry_delay_429_ms` | 500 | 429 Key 在当前请求中的冷却时间 |
-| `max_rotation_rounds` | 3 | 单个渠道内最多执行的完整 Key 轮次 |
-| `max_total_wait_ms` | 30000 | 单个渠道 dispatch 的 Context 硬截止时间 |
+| `max_rotation_rounds` | 3 | 当前 Channel 最多参加的完整 Key 轮次 |
+| `max_total_wait_ms` | 30000 | 单 Channel 模式的 Context 硬截止时间 |
 | `consec_error_threshold` | 3 | 单 Key 跨请求连续错误暂停阈值 |
 | `pause_multiplier_sec` | 30 | Key 暂停时长的线性递增步长（秒） |
 | `pause_max_sec` | 600 | 单次 Key 暂停时长上限（秒） |
 
 ## 请求级轮转状态
 
-每个渠道 dispatch 创建独立的 `RetryState`：
+每个请求为每个候选 Channel 创建独立遍历状态：
 
 - `attempted` 保存当前轮已尝试的 Key，每轮每个候选 Key 最多调用一次。
 - `cooldownUntil` 保存本请求中 429 Key 的冷却截止时间。
-- 一轮无候选 Key 后清空 `attempted` 并进入下一轮。
+- 完成所有 Channel 的当前轮后清空 `attempted` 并进入下一轮。
 - Key 选择通过 `KeyPool.NextExcluding` 完成，所有选择策略都先过滤排除集合。
 
-`max_rotation_rounds=3` 表示最多执行三轮完整 Key 选择，不再表示三次 HTTP 尝试。实际可能提前结束，原因包括：成功、400、其他 4xx、无全局可用 Key、总超时，或达到 `failover.consecutive_fail_threshold`。
+`max_rotation_rounds=3` 表示最多执行三轮完整 Key 选择，不再表示三次 HTTP 尝试。实际可能提前结束，原因包括成功、无可用 Key、客户端取消、总超时或已提交的流错误。
 
 ## 429 冷却
 
@@ -40,25 +40,25 @@
 
 这里没有阻塞式 `time.Sleep`。客户端取消、`max_total_wait_ms` 或外层 Failover deadline 都能中断等待。当前仍使用固定延迟，不解析 `Retry-After`。
 
-429 同时参与 Key 的跨请求暂停机制。请求级 cooldown 到期不代表全局暂停一定到期；两者取更严格的限制。
+429 不触发 Key 跨请求暂停；请求级 cooldown 到期后可在后续轮次重新候选。
 
 ## 状态码处理
 
 | 结果 | Key 行为 | 当前渠道行为 |
 |---|---|---|
-| 401 | 永久跳过；增加 `RequestCount` 和 401 计数 | 清零请求级连续网络/5xx 计数，选择下一 Key |
+| 401 | 永久跳过；增加 `RequestCount` 和 401 计数 | 选择下一个 Channel/Key |
 | 429 | 临时冷却；增加 429 计数 | 选择其他 Key，必要时等待冷却 |
-| 400 | Key 按 429 统计 | 立即向客户端返回 HTTP 429，不换渠道 |
-| 其他 4xx | 按实际状态统计 | 立即返回 `FailoverError` |
-| 5xx | 当前轮已尝试；增加 5xx 计数 | 当前轮选择下一 Key，下一轮可再次候选 |
+| 400 | Key 按 429 统计并 cooldown | 不写中间 429，继续下一个 Channel/Key |
+| 其他 4xx | 按实际状态统计 | 返回 `FailoverError`，继续其他 Channel |
+| 5xx | 当前轮已尝试；增加 5xx 计数 | 立即交错到下一个 Channel，下一轮可再次候选 |
 | 连接错误 | 当前轮已尝试；增加网络错误计数 | 与 5xx 相同 |
 | 成功 | 增加请求计数，清除连续错误和暂停 | 结束轮转 |
 
-401 的“清零”只针对本次 dispatch 的连续网络/5xx 计数，不会删除 Key 的历史错误统计。
+401 不会删除 Key 的历史错误统计，并会持久化永久跳过状态。
 
 ## Key 暂停
 
-除 401 永久跳过外，Key 错误会增加 `ConsecErrors`。达到阈值时：
+其他 4xx、网络错误和流错误会增加 `ConsecErrors`。400/429 和 5xx 使用专门统计，不触发这一跨请求暂停。达到阈值时：
 
 ```text
 pause = (ConsecErrors - consec_error_threshold + 1) * pause_multiplier_sec
@@ -78,7 +78,7 @@ pause = min(pause, pause_max_sec)
 
 ## 与 Failover 的关系
 
-`failover.consecutive_fail_threshold` 是本请求、当前渠道内网络/5xx 的提前退出阈值，默认值为 2。它可能在完整 Key 轮次结束前返回 `FailoverError`。
+`failover.enabled=true` 时，执行器遍历所有健康候选 Channel；关闭时只选择一个 Channel，但仍对该 Channel 执行完整 Key 轮次。
 
 ChannelHealth 只累计明确的连接错误和上游 5xx。401、429、400、其他 4xx、客户端取消和协议转换错误不会暂停整个渠道。
 
@@ -103,8 +103,6 @@ channels:
       pause_max_sec: 600
 ```
 
-需要保证至少完成一轮全部 Key 的 5xx 尝试时，`failover.consecutive_fail_threshold` 必须不小于该渠道可用 Key 数量，或按部署目标关闭/调高该提前退出阈值。
+## 已删除字段
 
-## 兼容字段
-
-渠道旧字段 `max_retries`、`retry_delay_ms` 目前不参与这套状态机。保留它们是配置兼容行为，不应把它们视为串行 Key 轮转的有效参数。
+`max_retries`、`retry_delay_ms`、`failover.max_channel_attempts` 和 `failover.consecutive_fail_threshold` 已删除，配置加载会给出替代字段提示。

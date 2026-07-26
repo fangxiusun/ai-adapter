@@ -15,6 +15,9 @@
 - R-04、R-05：增加“响应已处理”结果，流解析/写入失败不再返回 `nil`，不会被 `failoverLoop` 调用 `ReportChannelSuccess`；错误进入统一请求统计。
 - R-06：跨协议目标为 Chat 时，写入后显式 flush。
 - R-07：Gemini 原生及 Fanout URL 使用解析后的上游模型 ID，客户端 alias 不再进入上游路径。
+- R-08：保留未知模型 fallback 产品行为，但增加 `model_route_fallback=true`、请求模型、解析模型、Channel 和原因等结构化 Warning；fallback 不进入成功路由缓存。
+- R-09：新增统一单次尝试分类器和全局 Channel/Key 重试执行器，顺序改为 `A/key1 -> B/key1 -> A/key2 -> B/key2`；同模型优先上次成功路由；删除 `max_retries`、`retry_delay_ms`、`max_channel_attempts`、`consecutive_fail_threshold` 及无调用辅助函数，并增加状态码、遍历、多轮和 cooldown 契约测试。
+- R-10（部分）：开启跨 Channel failover 时旁路 Fanout，保证严格单 Key 交错；关闭 failover 时 Fanout 明确作为原子并发例外。Fanout 400 不再直接向客户端写 429，但 Header 传递等剩余差异仍未处理。
 - R-11、R-12、R-15：KeyState 读写改为锁内快照/方法，401 永久跳过状态写入数据库，动态新增 Key 继承渠道健康参数。
 - R-14（部分）：修复 Admin Key 的 batch/export/import 子路由解析；运行时增删写回配置文件仍未实现。
 - R-23：配置加载拒绝负数 Fanout/重试/超时参数，`GetN` 对非正数增加防御，避免负数切片 panic。
@@ -22,7 +25,7 @@
 - R-33：协议转换 ID 改为随机 UUID 派生的 24 位十六进制值。
 - 同时将渠道列表和同优先级模型候选按 `Priority, ID` 稳定排序，消除 map 遍历导致的非确定行为。
 
-本轮未处理且仍需优先关注：R-08 至 R-10、R-13、R-16 至 R-22、R-24 至 R-30、R-34 至 R-36。尤其是 Admin/Debug/Metrics 鉴权与凭证暴露（R-17 至 R-21）仍属于 P0/P1 风险。
+本轮未处理或仅部分处理且仍需优先关注：R-10、R-13、R-16 至 R-22、R-24 至 R-30、R-34 至 R-36。尤其是 Admin/Debug/Metrics 鉴权与凭证暴露（R-17 至 R-21）仍属于 P0/P1 风险。R-08、R-09 的当前实施契约详见 `docs/18-全局Channel-Key交错调度设计与实现.md`。
 
 ## 1. 审查范围与方法
 
@@ -475,4 +478,4 @@ HTTP 请求
 
 当前系统不是“单点小问题”，而是多个状态层、多个转发实现和多个观测出口之间的契约没有收敛。最危险的组合是：错误被当成成功、统计缺失、Key/渠道健康被错误重置，同时管理面和指标面可以泄露凭证。
 
-本 Review 没有修改业务代码。修复时应先以本文的状态码矩阵、结果分类和安全边界为验收基线，再逐步重构重复路径；否则局部修改很容易在另一套原生/转换/Fanout/流式分支重新引入同类问题。
+本文第 2 节以后保留初始 Review 的修复前证据；初始 Review 阶段没有修改业务代码。其后已按第 0 节所列项目实施修复，当前行为应以第 0 节、自动化契约测试和 `docs/18-全局Channel-Key交错调度设计与实现.md` 为准。未完成风险仍应按本文严重度继续处理。

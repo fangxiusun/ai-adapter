@@ -214,6 +214,18 @@ func (kp *KeyPool) NextExcluding(exclude map[string]bool) *KeyEntry {
 	return selected
 }
 
+// FindAvailable returns the named key when it is currently eligible.
+func (kp *KeyPool) FindAvailable(keyValue string) *KeyEntry {
+	kp.mu.RLock()
+	defer kp.mu.RUnlock()
+	for _, k := range kp.keys {
+		if k.Value == keyValue && k.State.IsAvailable() {
+			return k
+		}
+	}
+	return nil
+}
+
 func (kp *KeyPool) leastRateLimited(available []*KeyEntry) *KeyEntry {
 	if len(available) == 0 {
 		return nil

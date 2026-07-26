@@ -67,8 +67,6 @@ type ChannelConfig struct {
 	DefaultModel     string          `yaml:"default_model"`
 	Keys             []KeyConfig     `yaml:"keys"`
 	KeyStrategy      string          `yaml:"key_strategy"`
-	MaxRetries       int             `yaml:"max_retries"`
-	RetryDelayMs     int             `yaml:"retry_delay_ms"`
 	RequestTimeoutMs int             `yaml:"request_timeout_ms"`
 	Fanout           FanoutConfig    `yaml:"fanout"`
 	Thinking         ThinkingConfig  `yaml:"thinking"`
@@ -97,11 +95,9 @@ type RetryConfig struct {
 
 // FailoverConfig controls cross-channel failover behavior.
 type FailoverConfig struct {
-	Enabled                  bool   `yaml:"enabled"`
-	MaxChannelAttempts       int    `yaml:"max_channel_attempts"`
-	TotalTimeoutMs           int    `yaml:"total_timeout_ms"`
-	ConsecutiveFailThreshold int    `yaml:"consecutive_fail_threshold"`
-	LoadBalance              string `yaml:"load_balance"`
+	Enabled        bool   `yaml:"enabled"`
+	TotalTimeoutMs int    `yaml:"total_timeout_ms"`
+	LoadBalance    string `yaml:"load_balance"`
 }
 
 type ModelConfig struct {
@@ -164,9 +160,15 @@ func Parse(data []byte) (*Config, error) {
 // checkForbiddenKeys detects deprecated config fields and returns a clear error.
 func checkForbiddenKeys(data []byte) error {
 	var raw struct {
+		Failover struct {
+			MaxChannelAttempts       *int `yaml:"max_channel_attempts"`
+			ConsecutiveFailThreshold *int `yaml:"consecutive_fail_threshold"`
+		} `yaml:"failover"`
 		Channels []struct {
-			ID      string  `yaml:"id"`
-			WireAPI *string `yaml:"wire_api"`
+			ID           string  `yaml:"id"`
+			WireAPI      *string `yaml:"wire_api"`
+			MaxRetries   *int    `yaml:"max_retries"`
+			RetryDelayMs *int    `yaml:"retry_delay_ms"`
 		} `yaml:"channels"`
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
@@ -176,6 +178,18 @@ func checkForbiddenKeys(data []byte) error {
 		if ch.WireAPI != nil {
 			return fmt.Errorf("channel %s: wire_api has been removed, use interface capability URLs instead (chat_url, responses_url, messages_url, generate_content_url)", ch.ID)
 		}
+		if ch.MaxRetries != nil {
+			return fmt.Errorf("channel %s: max_retries has been removed; use retry.max_rotation_rounds", ch.ID)
+		}
+		if ch.RetryDelayMs != nil {
+			return fmt.Errorf("channel %s: retry_delay_ms has been removed; use retry.retry_delay_429_ms", ch.ID)
+		}
+	}
+	if raw.Failover.MaxChannelAttempts != nil {
+		return fmt.Errorf("failover.max_channel_attempts has been removed; traversal now covers all available channel/key pairs")
+	}
+	if raw.Failover.ConsecutiveFailThreshold != nil {
+		return fmt.Errorf("failover.consecutive_fail_threshold has been removed; use retry.max_rotation_rounds and failover.total_timeout_ms")
 	}
 	return nil
 }
@@ -210,12 +224,6 @@ func (c *Config) applyDefaults() {
 		if ch.KeyStrategy == "" {
 			ch.KeyStrategy = "round-robin"
 		}
-		if ch.MaxRetries == 0 {
-			ch.MaxRetries = 2
-		}
-		if ch.RetryDelayMs == 0 {
-			ch.RetryDelayMs = 500
-		}
 		if ch.RequestTimeoutMs == 0 {
 			ch.RequestTimeoutMs = 60000
 		}
@@ -247,14 +255,8 @@ func (c *Config) applyDefaults() {
 			ch.Priority = 100
 		}
 	}
-	if c.Failover.MaxChannelAttempts == 0 {
-		c.Failover.MaxChannelAttempts = 3
-	}
 	if c.Failover.TotalTimeoutMs == 0 {
 		c.Failover.TotalTimeoutMs = 120000
-	}
-	if c.Failover.ConsecutiveFailThreshold == 0 {
-		c.Failover.ConsecutiveFailThreshold = 2
 	}
 	if c.Failover.LoadBalance == "" {
 		c.Failover.LoadBalance = "priority"
@@ -291,8 +293,8 @@ func (c *Config) validate() error {
 	if c.Server.MaxRequestBodySizeMB < 0 {
 		return fmt.Errorf("server max_request_body_size_mb must not be negative")
 	}
-	if c.Failover.MaxChannelAttempts < 0 || c.Failover.TotalTimeoutMs < 0 || c.Failover.ConsecutiveFailThreshold < 0 {
-		return fmt.Errorf("failover retry and timeout values must not be negative")
+	if c.Failover.TotalTimeoutMs < 0 {
+		return fmt.Errorf("failover total_timeout_ms must not be negative")
 	}
 	ids := make(map[string]bool)
 	for _, ch := range c.Channels {
@@ -306,8 +308,8 @@ func (c *Config) validate() error {
 		if ch.ProxyID != "" && !proxyIDs[ch.ProxyID] {
 			return fmt.Errorf("channel %s: proxy_id %q not found in proxies", ch.ID, ch.ProxyID)
 		}
-		if ch.MaxRetries < 0 || ch.RetryDelayMs < 0 || ch.RequestTimeoutMs < 0 || ch.KeyStatsSyncSec < 0 {
-			return fmt.Errorf("channel %s: retry, timeout, and key_stats_sync_sec values must not be negative", ch.ID)
+		if ch.RequestTimeoutMs < 0 || ch.KeyStatsSyncSec < 0 {
+			return fmt.Errorf("channel %s: timeout and key_stats_sync_sec values must not be negative", ch.ID)
 		}
 		if ch.Fanout.Count < 0 {
 			return fmt.Errorf("channel %s: fanout count must not be negative", ch.ID)

@@ -28,27 +28,28 @@ type RetryState struct {
 	round                    int
 	retryDelay               time.Duration
 	maxTotalWait             time.Duration
-	consecFails              int
-	consecFailThreshold      int
 	lastFailureAffectsHealth bool
+	singleAttempt            bool
+	forcedKey                *channel.KeyEntry
+	attemptIssued            bool
+	lastAttemptStatus        int
+	lastAttemptCooldownUntil time.Time
 }
 
-func newRetryState(ch *channel.Channel, failoverThreshold int) *RetryState {
+func newRetryState(ch *channel.Channel) *RetryState {
 	cfg := ch.Config.Retry
+	maxRounds := cfg.MaxRotationRounds
+	if maxRounds <= 0 {
+		maxRounds = 1
+	}
 	return &RetryState{
 		start:         time.Now(),
 		attempted:     make(map[string]bool),
 		cooldownUntil: make(map[string]time.Time),
-		maxRounds:     cfg.MaxRotationRounds,
+		maxRounds:     maxRounds,
 		round:         1,
 		retryDelay:    time.Duration(cfg.RetryDelay429Ms) * time.Millisecond,
 		maxTotalWait:  time.Duration(cfg.MaxTotalWaitMs) * time.Millisecond,
-		consecFailThreshold: func() int {
-			if failoverThreshold > 0 {
-				return failoverThreshold
-			}
-			return 9999 // effectively disabled
-		}(),
 	}
 }
 
@@ -68,11 +69,33 @@ func (rs *RetryState) withDeadline(parent context.Context) (context.Context, con
 }
 
 func (rs *RetryState) coolDown(key string) {
-	rs.cooldownUntil[key] = time.Now().Add(rs.retryDelay)
+	until := time.Now().Add(rs.retryDelay)
+	rs.cooldownUntil[key] = until
+	rs.lastAttemptCooldownUntil = until
 }
 
 func (rs *RetryState) noteFailure(status int, affectsHealth bool) {
 	rs.lastFailureAffectsHealth = affectsHealth
+	rs.lastAttemptStatus = status
+}
+
+func newSingleAttemptRetryState(ch *channel.Channel, key *channel.KeyEntry) *RetryState {
+	rs := newRetryState(ch)
+	rs.singleAttempt = true
+	rs.forcedKey = key
+	return rs
+}
+
+func (rs *RetryState) singleAttemptError(ch *channel.Channel) *FailoverError {
+	key := ""
+	if rs.forcedKey != nil {
+		key = rs.forcedKey.Value
+	}
+	return &FailoverError{
+		StatusCode: rs.lastAttemptStatus, Message: fmt.Sprintf("channel %s attempt completed; continue channel-key traversal", ch.Config.ID),
+		AffectsChannelHealth: rs.lastFailureAffectsHealth, RetryNext: true, RetryKey: key,
+		RetryCooldownUntil: rs.lastAttemptCooldownUntil,
+	}
 }
 
 func (rs *RetryState) exclusionSet(now time.Time) (map[string]bool, time.Time) {
@@ -103,6 +126,15 @@ func (h *ProxyHandler) nextKey(ctx context.Context, ch *channel.Channel, rs *Ret
 		}
 		if rs.isTimedOut() {
 			return nil, &FailoverError{StatusCode: http.StatusGatewayTimeout, Message: fmt.Sprintf("channel %s: max total wait exceeded (%dms)", ch.Config.ID, rs.maxTotalWait.Milliseconds())}
+		}
+		if rs.singleAttempt && rs.attemptIssued {
+			return nil, rs.singleAttemptError(ch)
+		}
+		if rs.singleAttempt && rs.forcedKey != nil {
+			key := rs.forcedKey
+			rs.attemptIssued = true
+			rs.attempted[key.Value] = true
+			return key, nil
 		}
 
 		excluded, earliestCooldown := rs.exclusionSet(time.Now())

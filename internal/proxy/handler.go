@@ -27,15 +27,21 @@ import (
 
 // ProxyHandler handles incoming API requests and dispatches them to upstream services.
 type ProxyHandler struct {
-	channels     *channel.ChannelManager
-	db           *db.DB
-	logger       *log.Logger
-	config       *config.Config
-	deepDebug    *debuglog.DeepDebugLogger
-	headerEngine *headerpolicy.Engine
-	stats        *stats.Stats
-	wsHub        *websocket.Hub
-	requestLogs  sync.Map
+	channels      *channel.ChannelManager
+	db            *db.DB
+	logger        *log.Logger
+	config        *config.Config
+	deepDebug     *debuglog.DeepDebugLogger
+	headerEngine  *headerpolicy.Engine
+	stats         *stats.Stats
+	wsHub         *websocket.Hub
+	requestLogs   sync.Map
+	successRoutes sync.Map
+}
+
+type successfulRoute struct {
+	channelID string
+	key       string
 }
 
 type requestLogMeta struct {
@@ -53,6 +59,29 @@ type requestLogMeta struct {
 // NewProxyHandler creates a new ProxyHandler.
 func NewProxyHandler(channels *channel.ChannelManager, database *db.DB, logger *log.Logger, cfg *config.Config, deepDebug *debuglog.DeepDebugLogger, headerEngine *headerpolicy.Engine, statsInstance *stats.Stats, hub *websocket.Hub) *ProxyHandler {
 	return &ProxyHandler{channels: channels, db: database, logger: logger, config: cfg, deepDebug: deepDebug, headerEngine: headerEngine, stats: statsInstance, wsHub: hub}
+}
+
+func (h *ProxyHandler) rememberSuccessfulRoute(model, channelID, key string) {
+	if model == "" || channelID == "" || key == "" {
+		return
+	}
+	h.successRoutes.Store(model, successfulRoute{channelID: channelID, key: key})
+}
+
+func (h *ProxyHandler) lastSuccessfulRoute(model string) (successfulRoute, bool) {
+	value, ok := h.successRoutes.Load(model)
+	if !ok {
+		return successfulRoute{}, false
+	}
+	route, ok := value.(successfulRoute)
+	return route, ok
+}
+
+func (h *ProxyHandler) forgetSuccessfulRoute(model, channelID, key string) {
+	route, ok := h.lastSuccessfulRoute(model)
+	if ok && route.channelID == channelID && (key == "" || route.key == key) {
+		h.successRoutes.Delete(model)
+	}
 }
 
 func (h *ProxyHandler) beginRequestLog(reqID string, r *http.Request) {
@@ -415,6 +444,12 @@ func (h *ProxyHandler) HandleGenerateContent(w http.ResponseWriter, r *http.Requ
 // ==================== Core Dispatch ====================
 
 func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, model string, stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
+	return h.dispatchWithRetry(w, r, reqID, ch, target, model, stream, rawBody, targetReq, deepLog, nil)
+}
+
+// dispatchWithRetry performs one channel dispatch. A non-nil RetryState can
+// constrain the dispatch to the single key selected by the global traversal.
+func (h *ProxyHandler) dispatchWithRetry(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, model string, stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog, rs *RetryState) *FailoverError {
 	source, ok := config.BestSourceForTarget(target, &ch.Config)
 	if !ok {
 		h.sendError(w, reqID, 503, "no_conversion_path",
@@ -422,8 +457,16 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 		return handledError(http.StatusServiceUnavailable, "no conversion path")
 	}
 	upstreamModel := model
-	if mi, ok := ch.ResolveModel(model); ok && mi.ID != "" {
+	if mi, ok, fallback := ch.ResolveModelRoute(model); ok && mi.ID != "" {
 		upstreamModel = mi.ID
+		if fallback {
+			h.logger.RequestWarn(reqID, "未知模型回退默认模型",
+				"model_route_fallback", true,
+				"requested_model", model,
+				"resolved_model", upstreamModel,
+				"fallback_channel", ch.Config.ID,
+				"fallback_reason", "unknown_model")
+		}
 	}
 	h.setRequestRouteLog(reqID, ch.Config.ID, "", upstreamModel)
 
@@ -431,7 +474,7 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 	if source == target {
 		rawBody = replaceModelInBody(rawBody, model, upstreamModel)
 		h.logger.RequestDebug(reqID, "构造渠道请求", "channel_id", ch.Config.ID, "client_model", model, "upstream_model", upstreamModel)
-		return h.nativeForward(w, r, reqID, ch, source, rawBody, model, upstreamModel, stream, deepLog)
+		return h.nativeForward(w, r, reqID, ch, source, rawBody, model, upstreamModel, stream, deepLog, rs)
 	}
 	chatReq, err := h.buildChatRequest(target, targetReq, upstreamModel, stream)
 	h.logger.RequestDebug(reqID, "转换渠道请求", "channel_id", ch.Config.ID, "client_model", model, "upstream_model", upstreamModel)
@@ -440,79 +483,217 @@ func (h *ProxyHandler) dispatch(w http.ResponseWriter, r *http.Request, reqID st
 		return handledError(http.StatusBadRequest, err.Error())
 	}
 	if stream {
-		return h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, upstreamModel, targetReq, deepLog)
+		return h.convertedStreamForward(w, r, reqID, ch, source, target, chatReq, upstreamModel, targetReq, deepLog, rs)
 	}
-	return h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, upstreamModel, targetReq, deepLog)
+	return h.convertedNonStreamForward(w, r, reqID, ch, source, target, chatReq, upstreamModel, targetReq, deepLog, rs)
 }
 
-// failoverLoop tries dispatching to each candidate channel in order.
-// On failoverable errors, it moves to the next channel.
-// On success or non-failoverable errors, it returns immediately.
 func (h *ProxyHandler) failoverLoop(w http.ResponseWriter, r *http.Request, reqID string,
 	candidates []*channel.Channel, target config.InterfaceType, clientModel string,
 	stream bool, rawBody []byte, targetReq interface{}, deepLog *debuglog.RequestLog) {
 
 	fc := h.config.Failover
-	if !fc.Enabled || len(candidates) <= 1 {
-		// No failover — use balanced selection
-		ch := h.channels.SelectBalanced(candidates)
+	preferred, preferredOK := h.lastSuccessfulRoute(clientModel)
 
-		if failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog); failErr != nil && !failErr.Handled {
-			h.sendError(w, reqID, failErr.StatusCode, "channel_dispatch_failed", failErr.Message)
+	// With cross-channel failover disabled, reduce the candidate set to one
+	// channel. Non-fanout requests still use the same key traversal executor.
+	// Fanout remains an explicit atomic exception because it selects multiple
+	// keys concurrently inside the channel package.
+	if !fc.Enabled {
+		ch := h.channels.SelectBalanced(candidates)
+		if preferredOK {
+			for _, candidate := range candidates {
+				if candidate.Config.ID == preferred.channelID && candidate.IsHealthy() {
+					ch = candidate
+					break
+				}
+			}
 		}
+		if ch.FanoutEnabled() {
+			if failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog); failErr != nil {
+				if failErr.Handled {
+					return
+				}
+				if failErr.AffectsChannelHealth {
+					ch.ReportChannelFailure()
+				}
+				h.forgetSuccessfulRoute(clientModel, ch.Config.ID, "")
+				h.sendError(w, reqID, normalizedTraversalStatus(failErr, false), "channel_dispatch_failed", failErr.Message)
+			} else {
+				ch.ReportChannelSuccess()
+			}
+			return
+		}
+		candidates = []*channel.Channel{ch}
+		preferredOK = preferredOK && preferred.channelID == ch.Config.ID
+	}
+
+	ordered := append([]*channel.Channel(nil), candidates...)
+	if len(ordered) > 1 {
+		ordered = h.channels.ReorderCandidates(ordered)
+	}
+	eligible := make([]*channel.Channel, 0, len(ordered))
+	for _, ch := range ordered {
+		if ch.IsHealthy() {
+			eligible = append(eligible, ch)
+		} else {
+			h.logger.RequestDebug(reqID, "跳过不健康渠道", "channel_id", ch.Config.ID)
+		}
+	}
+	if len(eligible) == 0 {
+		h.sendError(w, reqID, http.StatusServiceUnavailable, "no_healthy_channel", "no healthy channels available")
 		return
 	}
 
-	// Reorder candidates based on load balance strategy (round-robin/random/priority)
-	candidates = h.channels.ReorderCandidates(candidates)
-	deadline := time.Now().Add(time.Duration(fc.TotalTimeoutMs) * time.Millisecond)
-	failoverCtx, cancelFailover := context.WithDeadline(r.Context(), deadline)
-	defer cancelFailover()
-	r = r.WithContext(failoverCtx)
-	tried := 0
+	timeoutMs := fc.TotalTimeoutMs
+	if len(eligible) == 1 && eligible[0].Config.Retry.MaxTotalWaitMs > 0 {
+		timeoutMs = eligible[0].Config.Retry.MaxTotalWaitMs
+	}
+	traversalCtx := r.Context()
+	var cancel context.CancelFunc
+	if timeoutMs > 0 {
+		traversalCtx, cancel = context.WithTimeout(traversalCtx, time.Duration(timeoutMs)*time.Millisecond)
+		defer cancel()
+	}
+	r = r.WithContext(traversalCtx)
+	traversal := newChannelTraversal(eligible, preferred, preferredOK)
 	var lastErr *FailoverError
+	attempts := 0
 
-	for _, ch := range candidates {
-		if tried >= fc.MaxChannelAttempts {
-			break
+	processAttempt := func(state *traversalChannelState, key *channel.KeyEntry, round int) (bool, bool) {
+		if err := traversalCtx.Err(); err != nil {
+			lastErr = retryContextError(state.ch, err, "channel traversal ended")
+			return true, false
 		}
-		if time.Now().After(deadline) {
-			h.logger.RequestWarn(reqID, "渠道故障转移超时", "tried", tried)
-			break
-		}
-		if !ch.IsHealthy() {
-			h.logger.RequestDebug(reqID, "跳过不健康渠道", "channel_id", ch.Config.ID)
-			continue
-		}
-
-		h.logger.RequestDebug(reqID, "尝试渠道", "channel_id", ch.Config.ID, "attempt", tried+1)
-		failErr := h.dispatch(w, r, reqID, ch, target, clientModel, stream, rawBody, targetReq, deepLog)
-
+		attempts++
+		h.logger.RequestDebug(reqID, "尝试渠道 Key",
+			"channel_id", state.ch.Config.ID,
+			"channel_key", util.MaskKey(key.Value),
+			"round", round,
+			"attempt", attempts)
+		rs := newSingleAttemptRetryState(state.ch, key)
+		failErr := h.dispatchWithRetry(w, r, reqID, state.ch, target, clientModel, stream, rawBody, targetReq, deepLog, rs)
 		if failErr == nil {
-			ch.ReportChannelSuccess()
-			return
+			state.ch.ReportChannelSuccess()
+			if _, routeOK, fallback := state.ch.ResolveModelRoute(clientModel); routeOK && !fallback {
+				h.rememberSuccessfulRoute(clientModel, state.ch.Config.ID, key.Value)
+			}
+			return true, true
 		}
 		if failErr.Handled {
+			h.forgetSuccessfulRoute(clientModel, state.ch.Config.ID, key.Value)
+			return true, false
+		}
+		if failErr.RetryCooldownUntil.After(time.Now()) {
+			cooldownKey := failErr.RetryKey
+			if cooldownKey == "" {
+				cooldownKey = key.Value
+			}
+			state.cooldownUntil[cooldownKey] = failErr.RetryCooldownUntil
+		}
+		if failErr.AffectsChannelHealth {
+			state.ch.ReportChannelFailure()
+		}
+		h.forgetSuccessfulRoute(clientModel, state.ch.Config.ID, key.Value)
+		lastErr = failErr
+		h.logger.RequestWarn(reqID, "切换下一个渠道 Key",
+			"channel_id", state.ch.Config.ID,
+			"channel_key", util.MaskKey(key.Value),
+			"reason", failErr.Message,
+			"round", round,
+			"attempt", attempts)
+		return false, false
+	}
+
+	// A cached route is a one-time fast path. Once it fails, the normal global
+	// round starts and retains the failed key in the first round's attempted set.
+	if state, key := traversal.selectPreferred(); key != nil {
+		if stop, _ := processAttempt(state, key, 1); stop {
 			return
 		}
+	} else if preferredOK {
+		h.forgetSuccessfulRoute(clientModel, preferred.channelID, preferred.key)
+	}
 
-		// Only upstream 5xx and connection failures affect channel health.
-		if failErr.AffectsChannelHealth {
-			ch.ReportChannelFailure()
+	for round := 1; round <= traversal.maxRounds(); round++ {
+		if traversalCtx.Err() != nil {
+			break
 		}
-		lastErr = failErr
-		tried++
-		h.logger.RequestWarn(reqID, "切换下一渠道",
-			"channel_id", ch.Config.ID, "reason", failErr.Message, "tried", tried)
+		for {
+			passAttempted := false
+			var earliestCooldown time.Time
+			for _, state := range traversal.states {
+				if round > state.maxRounds {
+					continue
+				}
+				key, waitUntil := traversal.selectKey(state, time.Now())
+				if key == nil {
+					if !waitUntil.IsZero() && (earliestCooldown.IsZero() || waitUntil.Before(earliestCooldown)) {
+						earliestCooldown = waitUntil
+					}
+					continue
+				}
+				passAttempted = true
+				if stop, _ := processAttempt(state, key, round); stop {
+					return
+				}
+			}
+			if passAttempted {
+				// One pass consumes at most one key per channel, which is the
+				// property that prevents a single channel from monopolizing retries.
+				continue
+			}
+			if !earliestCooldown.IsZero() {
+				if fe := waitForTraversalCooldown(traversalCtx, earliestCooldown); fe != nil {
+					lastErr = fe
+					break
+				}
+				continue
+			}
+			break
+		}
+		if round < traversal.maxRounds() {
+			traversal.resetRound()
+		}
 	}
 
-	// All channels failed
-	if lastErr != nil {
-		h.sendError(w, reqID, lastErr.StatusCode, "all_channels_failed",
-			fmt.Sprintf("all %d channels failed, last error: %s", tried, lastErr.Message))
-	} else {
-		h.sendError(w, reqID, 503, "no_healthy_channel", "no healthy channels available")
+	if traversalCtx.Err() != nil {
+		lastErr = retryContextError(eligible[0], traversalCtx.Err(), "channel traversal ended")
 	}
+	if lastErr == nil {
+		h.sendError(w, reqID, http.StatusServiceUnavailable, "no_available_route", "no available channel/key route")
+		return
+	}
+	status := normalizedTraversalStatus(lastErr, true)
+	h.sendError(w, reqID, status, "all_routes_failed",
+		fmt.Sprintf("all channel/key routes failed after %d attempts: %s", attempts, lastErr.Message))
+}
+
+func waitForTraversalCooldown(ctx context.Context, until time.Time) *FailoverError {
+	timer := time.NewTimer(time.Until(until))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return &FailoverError{StatusCode: http.StatusGatewayTimeout, Message: "channel traversal cooldown wait ended: " + ctx.Err().Error()}
+	}
+}
+
+func normalizedTraversalStatus(err *FailoverError, exhausted bool) int {
+	if err == nil {
+		return http.StatusServiceUnavailable
+	}
+	if err.StatusCode > 0 && (!exhausted || !err.RetryNext) {
+		return err.StatusCode
+	}
+	if err.StatusCode == http.StatusGatewayTimeout {
+		return http.StatusGatewayTimeout
+	}
+	if err.StatusCode == 0 {
+		return http.StatusBadGateway
+	}
+	return http.StatusServiceUnavailable
 }
 
 func (h *ProxyHandler) buildChatRequest(target config.InterfaceType, targetReq interface{}, model string, stream bool) (*translate.ChatRequest, error) {

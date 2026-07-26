@@ -644,8 +644,7 @@
                 this.configData.proxies ||= [];
                 this.configData.failover ||= {};
                 merge(this.configData.failover, {
-                    enabled: false, max_channel_attempts: 3, total_timeout_ms: 120000,
-                    consecutive_fail_threshold: 2, load_balance: 'priority'
+                    enabled: false, total_timeout_ms: 120000, load_balance: 'priority'
                 });
                 this.configData.headers ||= {
                     request: this.createHeaderPolicy(),
@@ -839,8 +838,6 @@
                     default_model: 'model-id',
                     keys: [{ value: '', name: 'key-1' }],
                     key_strategy: 'round-robin',
-                    max_retries: 2,
-                    retry_delay_ms: 500,
                     request_timeout_ms: 60000,
                     fanout: { enabled: false, count: 2, wait_all: false },
                     thinking: { default_enabled: false, force_high_effort: false },
@@ -864,7 +861,7 @@
                     'id', 'name', 'enabled', 'proxy_id', 'priority',
                     'chat_url', 'responses_url', 'messages_url', 'generate_content_url',
                     'models', 'default_model', 'keys', 'key_strategy',
-                    'max_retries', 'retry_delay_ms', 'request_timeout_ms',
+                    'request_timeout_ms',
                     'fanout', 'thinking', 'web_search', 'retry', 'key_stats_sync_sec',
                     'request_headers', 'response_headers'
                 ];

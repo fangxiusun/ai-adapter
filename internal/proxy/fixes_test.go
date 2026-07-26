@@ -70,7 +70,7 @@ func TestNativeGeminiAliasUsesUpstreamModelInURL(t *testing.T) {
 	logger.SetEnabled(false)
 	cfg := &config.Config{
 		Server:   config.ServerConfig{MaxRequestBodySizeMB: 1},
-		Failover: config.FailoverConfig{MaxChannelAttempts: 1, TotalTimeoutMs: 1000, ConsecutiveFailThreshold: 1},
+		Failover: config.FailoverConfig{TotalTimeoutMs: 1000},
 		Channels: []config.ChannelConfig{{
 			ID:                 "gemini",
 			Enabled:            true,
@@ -122,10 +122,8 @@ func TestStreamConversionFailureIsNotReportedAsChannelSuccess(t *testing.T) {
 		ConsecErrorThreshold: 10, PauseMultiplierSec: 1, PauseMaxSec: 1,
 	}
 	cfg := &config.Config{
-		Server: config.ServerConfig{MaxRequestBodySizeMB: 1},
-		Failover: config.FailoverConfig{
-			Enabled: true, MaxChannelAttempts: 2, TotalTimeoutMs: 1000, ConsecutiveFailThreshold: 1,
-		},
+		Server:   config.ServerConfig{MaxRequestBodySizeMB: 1},
+		Failover: config.FailoverConfig{Enabled: true, TotalTimeoutMs: 1000},
 		Channels: []config.ChannelConfig{
 			{ID: "primary", Enabled: true, Priority: 1, ChatURL: malformed.URL, Models: []config.ModelConfig{{ID: "model"}}, Keys: []config.KeyConfig{{Value: "key-1"}}, RequestTimeoutMs: 1000, Retry: retry},
 			{ID: "fallback", Enabled: true, Priority: 2, ChatURL: fallback.URL, Models: []config.ModelConfig{{ID: "model"}}, Keys: []config.KeyConfig{{Value: "key-2"}}, RequestTimeoutMs: 1000, Retry: retry},

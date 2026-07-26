@@ -126,10 +126,8 @@ func TestUpstreamBadRequestRotatesToNextKey(t *testing.T) {
 			cfg := &config.Config{
 				Server: config.ServerConfig{MaxRequestBodySizeMB: 1},
 				Failover: config.FailoverConfig{
-					Enabled:                  false,
-					MaxChannelAttempts:       1,
-					TotalTimeoutMs:           1000,
-					ConsecutiveFailThreshold: 1,
+					Enabled:        false,
+					TotalTimeoutMs: 1000,
 				},
 				Channels: []config.ChannelConfig{channelConfig},
 			}
@@ -177,10 +175,8 @@ func TestHandleChatReturnsErrorWhenSingleChannelRequestFails(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{MaxRequestBodySizeMB: 1},
 		Failover: config.FailoverConfig{
-			Enabled:                  false,
-			MaxChannelAttempts:       1,
-			TotalTimeoutMs:           1000,
-			ConsecutiveFailThreshold: 1,
+			Enabled:        false,
+			TotalTimeoutMs: 1000,
 		},
 		Channels: []config.ChannelConfig{{
 			ID:               "test-channel",
@@ -271,7 +267,7 @@ func TestChannelHealthCountsOnlyServerAndConnectionFailures(t *testing.T) {
 			}
 			cfg := &config.Config{
 				Server:   config.ServerConfig{MaxRequestBodySizeMB: 1},
-				Failover: config.FailoverConfig{Enabled: true, MaxChannelAttempts: 2, TotalTimeoutMs: 2000, ConsecutiveFailThreshold: 1, LoadBalance: "priority"},
+				Failover: config.FailoverConfig{Enabled: true, TotalTimeoutMs: 2000, LoadBalance: "priority"},
 				Channels: []config.ChannelConfig{channelConfig("primary", primary.URL, 1), channelConfig("backup", backup.URL, 2)},
 			}
 			cm := channel.NewChannelManager(cfg.Channels, nil, logger, nil, "priority")
@@ -284,6 +280,9 @@ func TestChannelHealthCountsOnlyServerAndConnectionFailures(t *testing.T) {
 				if rec.Code != http.StatusOK {
 					t.Fatalf("request %d status = %d, want 200; body=%s", i+1, rec.Code, rec.Body.String())
 				}
+				// This test isolates ChannelHealth behavior from the separate
+				// same-model successful-route preference contract.
+				handler.successRoutes.Delete("test-model")
 			}
 			if got := primaryCalls.Load(); got != tt.wantPrimaryCalls {
 				t.Fatalf("primary calls = %d, want %d", got, tt.wantPrimaryCalls)
@@ -434,10 +433,8 @@ func TestHandleResponsesConvertedFanoutReturnsResponsesFormat(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{MaxRequestBodySizeMB: 1},
 		Failover: config.FailoverConfig{
-			Enabled:                  false,
-			MaxChannelAttempts:       1,
-			TotalTimeoutMs:           1000,
-			ConsecutiveFailThreshold: 1,
+			Enabled:        false,
+			TotalTimeoutMs: 1000,
 		},
 		Channels: []config.ChannelConfig{{
 			ID:               "test-channel",

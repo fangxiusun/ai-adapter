@@ -32,7 +32,7 @@ func TestRetryStateUsesCompleteKeyRounds(t *testing.T) {
 	ch := newRetryTestChannel(t, "round-robin", config.RetryConfig{
 		MaxRotationRounds: 2, MaxTotalWaitMs: 1000,
 	})
-	rs := newRetryState(ch, 99)
+	rs := newRetryState(ch)
 	ctx, cancel := rs.withDeadline(context.Background())
 	defer cancel()
 
@@ -61,7 +61,7 @@ func TestRetryStateMakesRateLimitedKeyEligibleAfterCooldown(t *testing.T) {
 	})
 	// Keep one candidate so the second selection must wait for its cooldown.
 	ch.ReportError("key-2", 401)
-	rs := newRetryState(ch, 99)
+	rs := newRetryState(ch)
 	ctx, cancel := rs.withDeadline(context.Background())
 	defer cancel()
 	h := &ProxyHandler{}

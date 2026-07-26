@@ -64,14 +64,12 @@ database:
 #     url: "socks5://user:pass@socks.example.com:1080"
 
 # Cross-channel failover configuration (optional)
-# When enabled, if a channel fails with retryable errors (5xx, connection failure),
-# the system automatically tries the next channel for the same model.
+# When enabled, the system traverses one key per channel in interleaved rounds:
+# A/key1 -> B/key1 -> A/key2 -> B/key2.
 failover:
   enabled: false
-  max_channel_attempts: 3       # Max channels to try per request
-  total_timeout_ms: 120000      # Overall request timeout across all channels
-  consecutive_fail_threshold: 2 # 5xx/connection failures before switching channel
-  load_balance: "priority"      # priority | round-robin | random
+  total_timeout_ms: 120000 # Overall request timeout across all channels and keys
+  load_balance: "priority" # priority | round-robin | random
 
 
 # Multi-channel failover example:
@@ -129,8 +127,6 @@ channels:
       - value: "sk-your-mimo-key-here"
         name: "主 key"
     key_strategy: "round-robin"
-    max_retries: 2
-    retry_delay_ms: 500
     request_timeout_ms: 60000
     fanout:
       enabled: false
@@ -181,7 +177,6 @@ channels:
       - value: "sk-your-deepseek-key-here"
         name: "主 key"
     key_strategy: "round-robin"
-    max_retries: 2
     retry:
       retry_delay_429_ms: 1000
       max_rotation_rounds: 3

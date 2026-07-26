@@ -9,11 +9,11 @@
 
 | 层级 | 状态 | 生命周期 | 用途 |
 |---|---|---|---|
-| 请求内 Key 轮转 | `RetryState` | 单次 Channel dispatch | 完整轮次、429 cooldown、总超时、连续网络/5xx |
+| 请求内全局遍历 | `channelTraversal` + `RetryState` | 单次客户端请求 | Channel/Key 交错轮次、400/429 cooldown、总超时 |
 | Key 健康 | `KeyState` | 跨请求，可持久化 | 401 永久跳过、错误计数、暂停、平均延迟 |
 | Channel 健康 | `ChannelHealth` | 跨请求 | 仅按连接错误和上游 5xx 暂停整个渠道 |
 
-外层 `failoverLoop` 负责候选 Channel 切换，内层串行状态机负责同一 Channel 的 Key 轮转。Fanout 是独立的并发竞速模式，不执行串行轮次。
+`failoverLoop` 同时负责 Channel 和 Key，按 `A/key1 -> B/key1 -> A/key2 -> B/key2` 交错调度。转发函数每次只执行调度器选定的一个 Key。Fanout 是独立的并发竞速模式，只在关闭跨 Channel failover 时作为原子例外执行。
 
 ## 2. 完整 Key 轮次
 
@@ -39,17 +39,17 @@
 
 | 上游结果 | 是否换 Key | 是否可进入下一轮 | 是否跨 Channel | ChannelHealth |
 |---|---|---|---|---|
-| 401 | 是 | 否，永久跳过 | Key 耗尽后可 | 不影响 |
-| 429 | 是 | cooldown 到期后可 | 轮次/超时耗尽后可 | 不影响 |
-| 400 | 否 | 否 | 否，直接返回客户端 429 | 不影响 |
-| 403/404/其他 4xx | 否 | 否 | 返回 `FailoverError` 后可 | 不影响 |
-| 5xx | 是 | 是 | 连续失败阈值或轮次耗尽后可 | 计失败 |
-| 连接错误 | 是 | 是 | 与 5xx 相同 | 计失败 |
+| 401 | 是 | 否，永久跳过 | 立即尝试下一个 Channel/Key | 不影响 |
+| 429 | 是 | cooldown 到期后可 | 立即尝试下一个 Channel/Key | 不影响 |
+| 400 | 是 | cooldown 到期后可 | Key 统计按 429，不写中间 429 | 不影响 |
+| 403/404/其他 4xx | 是 | 按轮次配置 | 返回 `FailoverError` 后继续其他 Channel | 不影响 |
+| 5xx | 是 | 是 | 立即交错到下一个 Channel | 计失败 |
+| 连接错误 | 是 | 是 | 立即交错到下一个 Channel | 计失败 |
 | 流解析/写入错误 | 提交 200 前视路径而定；提交后不能 | 否 | 提交 200 后不能 | 不计渠道失败 |
 
 ### 3.1 401
 
-401 调用 `On401`：增加 `RequestCount`、401 和总错误计数，并设置 `PermanentlySkipped=true`。它同时把本请求的连续网络/5xx 计数清零，随后选择其他 Key。
+401 调用 `On401`：增加 `RequestCount`、401 和总错误计数，并设置 `PermanentlySkipped=true`，随后选择其他 Channel/Key。
 
 恢复永久跳过 Key 需要显式 Resume/状态重置；普通 cooldown 到期不会恢复它。
 
@@ -57,11 +57,11 @@
 
 429 不再阻塞整个循环固定 Sleep。当前 Key 加入请求级 cooldown 后，状态机先尝试其他 Key；没有候选时才使用 Context 感知的 timer 等待最早 cooldown 到期。
 
-429 还会累加 Key 的 `ConsecErrors` 和五分钟限流窗口。达到 `consec_error_threshold` 后触发跨请求暂停，暂停时长按线性公式增长。
+429 会累加五分钟限流窗口，但不触发 Key 跨请求暂停。
 
 ### 3.3 400
 
-上游 400 保持项目既有业务解释：它被视为上游侧的限流/兼容性错误。客户端收到 HTTP 429，错误代码仍为 `upstream_bad_request`，错误体写入深度日志；Key 侧也按 429 统计。该路径直接结束，不切换 Channel。
+上游 400 保持项目既有业务解释：它被视为上游侧的限流/兼容性错误。Key 侧按 429 统计并进入请求级 cooldown，但不会把中间 HTTP 429 写给客户端，调度器继续其他 Channel/Key。
 
 ### 3.4 其他 4xx
 
@@ -69,7 +69,7 @@
 
 ### 3.5 5xx 与连接错误
 
-当前 Key 只在本轮标记为已尝试，状态机立即选择下一 Key；下一轮可以再次使用。两者增加请求级 `consecFails`，达到 `failover.consecutive_fail_threshold` 时可在完整轮次结束前提前切换 Channel。
+当前 Key 只在本轮标记为已尝试，状态机立即选择下一个 Channel；下一轮可以再次使用。不存在会提前截断完整轮次的请求级连续失败阈值。
 
 只有这两类明确设置 `FailoverError.AffectsChannelHealth=true`。
 
@@ -123,9 +123,9 @@ Fanout 在同一时间向多个 Key 发请求：
 - `wait_all=true` 仅用于非流式，等待全部完成后选择最快 2xx。
 - 流式赢家直到 Body 完整复制/转换后才记成功。
 - 每个流请求有独立 Context，取消落选请求不会取消赢家 Body。
-- 400 同样对客户端和 Key 映射为 429。
+- 400 对 Key 按 429 统计；Fanout 全失败的代表状态为 400 时，客户端最终收到 400。
 
-Fanout 不使用 `max_rotation_rounds` 和请求级 429 cooldown。需要严格串行轮转语义时应关闭 Fanout。
+Fanout 不使用 `max_rotation_rounds` 和请求级 429 cooldown。开启跨 Channel failover 时系统旁路 Fanout；只有关闭 failover 时选中 Channel 才执行 Fanout。
 
 ## 9. 配置示例
 
@@ -144,13 +144,10 @@ channels:
 
 failover:
   enabled: true
-  max_channel_attempts: 3
   total_timeout_ms: 120000
-  consecutive_fail_threshold: 2
+  load_balance: priority
 ```
-
-`consecutive_fail_threshold=2` 表示连续两次网络/5xx 即可提前切换 Channel。如果目标是至少尝试完一轮全部 Key，应把它调到不小于渠道可用 Key 数量。
 
 ## 10. 兼容说明
 
-旧字段 `max_retries` 和 `retry_delay_ms` 不参与当前渠道内轮转状态机，仍保留仅用于配置兼容。429 当前不解析 `Retry-After`，使用固定的 `retry_delay_429_ms`。
+旧字段 `max_retries`、`retry_delay_ms`、`max_channel_attempts` 和 `consecutive_fail_threshold` 已删除；配置加载会返回明确迁移错误。429 当前不解析 `Retry-After`，使用固定的 `retry_delay_429_ms`。

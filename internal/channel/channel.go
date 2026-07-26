@@ -305,29 +305,28 @@ func (ch *Channel) ReportChannelFailure() {
 }
 
 func (ch *Channel) ResolveModel(clientModel string) (ModelInfo, bool) {
+	model, ok, _ := ch.ResolveModelRoute(clientModel)
+	return model, ok
+}
+
+// ResolveModelRoute resolves a client model and reports whether the channel's
+// default model was used as a fallback.
+func (ch *Channel) ResolveModelRoute(clientModel string) (ModelInfo, bool, bool) {
 	if m, ok := ch.models[clientModel]; ok {
-		return ModelInfo{
-			ID:                m.ID,
-			DisplayName:       m.DisplayName,
-			ContextWindow:     m.ContextWindow,
-			MaxOutputTokens:   m.MaxOutputTokens,
-			SupportsImages:    m.SupportsImages,
-			SupportsReasoning: m.SupportsReasoning,
-			Aliases:           m.Aliases,
-		}, true
+		return modelInfoFromConfig(m), true, false
 	}
 	if m, ok := ch.models[ch.Config.DefaultModel]; ok {
-		return ModelInfo{
-			ID:                m.ID,
-			DisplayName:       m.DisplayName,
-			ContextWindow:     m.ContextWindow,
-			MaxOutputTokens:   m.MaxOutputTokens,
-			SupportsImages:    m.SupportsImages,
-			SupportsReasoning: m.SupportsReasoning,
-			Aliases:           m.Aliases,
-		}, true
+		return modelInfoFromConfig(m), true, true
 	}
-	return ModelInfo{}, false
+	return ModelInfo{}, false, false
+}
+
+func modelInfoFromConfig(m config.ModelConfig) ModelInfo {
+	return ModelInfo{
+		ID: m.ID, DisplayName: m.DisplayName, ContextWindow: m.ContextWindow,
+		MaxOutputTokens: m.MaxOutputTokens, SupportsImages: m.SupportsImages,
+		SupportsReasoning: m.SupportsReasoning, Aliases: m.Aliases,
+	}
 }
 
 func (ch *Channel) GetKey() *KeyEntry {
@@ -356,14 +355,6 @@ func (ch *Channel) HTTPClient() *http.Client {
 
 func (ch *Channel) KeyPool() *KeyPool {
 	return ch.keyPool
-}
-
-func (ch *Channel) MaxRetries() int {
-	return ch.Config.MaxRetries
-}
-
-func (ch *Channel) RetryDelay() time.Duration {
-	return time.Duration(ch.Config.RetryDelayMs) * time.Millisecond
 }
 
 func (ch *Channel) FanoutEnabled() bool {

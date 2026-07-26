@@ -98,27 +98,27 @@ channels:
 
 ## 与故障转移的关系
 
-Fanout 是**渠道内**的 Key 级并发策略，故障转移是**跨渠道**的切换策略。两者独立运作：
+Fanout 是**渠道内**的 Key 级并发策略，严格 Channel/Key 交错遍历是另一种执行模式：
 
 ```
-请求 → 故障转移循环（跨渠道）
-         │
-         └─ 渠道内处理：
-              ├─ fanout enabled → 并发多 Key
-              └─ fanout disabled → 串行轮转 Key
+failover.enabled=true
+  -> 严格 A/key1 -> B/key1 -> A/key2 顺序，旁路 Fanout
+
+failover.enabled=false
+  -> 只选择一个 Channel
+     -> fanout.enabled=true：原子并发多 Key
+     -> fanout.enabled=false：串行完整轮次
 ```
 
-- Fanout 全部失败 → 触发故障转移到下一渠道（如果启用）
-- 故障转移的判断逻辑不变（5xx/连接失败 → 转移）
+- 需要可预测的跨 Channel 全 Key 覆盖时，启用 failover。
+- 需要单 Channel 的并发低延迟竞速时，关闭 failover 并启用 Fanout。
 
 ## 完整配置示例
 
 ```yaml
 failover:
-  enabled: true
-  max_channel_attempts: 3
+  enabled: false
   total_timeout_ms: 120000
-  consecutive_fail_threshold: 2
 
 channels:
   # 主力渠道：启用 fanout，追求低延迟

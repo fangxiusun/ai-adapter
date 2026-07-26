@@ -41,10 +41,9 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 	})
 
 	if result.Error != nil {
-		if result.StatusCode == http.StatusBadRequest {
-			h.logUpstreamHTTPError(reqID, ch, result.Key, model, url, http.StatusBadRequest, http.StatusTooManyRequests, nil, result.ResponseBody, nil, deepLog)
-			h.sendErrorWithDebug(w, reqID, http.StatusTooManyRequests, upstreamBadRequestErrorCode, string(result.ResponseBody), deepLog)
-			return handledError(http.StatusTooManyRequests, string(result.ResponseBody))
+		if classifyAttempt(result.StatusCode, nil) == attemptMappedBadRequest {
+			h.logUpstreamHTTPError(reqID, ch, result.Key, model, url, http.StatusBadRequest, 0, nil, result.ResponseBody, nil, deepLog)
+			return &FailoverError{StatusCode: http.StatusBadRequest, Message: fmt.Sprintf("channel %s: fanout stream upstream returned 400", ch.Config.ID)}
 		}
 		h.logger.RequestWarn(reqID, "子渠道并发流式请求失败", "channel_id", ch.Config.ID, "error", result.Error)
 		return &FailoverError{StatusCode: result.StatusCode, Message: fmt.Sprintf("channel %s: fanout stream failed: %s", ch.Config.ID, result.Error), AffectsChannelHealth: result.AffectsChannelHealth}
@@ -95,7 +94,7 @@ func (h *ProxyHandler) fanoutStreamForward(w http.ResponseWriter, r *http.Reques
 
 // ==================== Stream Forwarding ====================
 
-func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
+func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog, rs *RetryState) *FailoverError {
 	// Inject stream_options.include_usage=true for Chat upstream.
 	injectedReq := *chatReq
 	injectedReq.StreamOptions = &translate.StreamOptions{IncludeUsage: true}
@@ -107,10 +106,12 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 	path := upstreamPathForInterface(config.InterfaceChat, model, true)
 
 	// Fanout fast-path for streaming requests.
-	if ch.FanoutEnabled() {
+	if ch.FanoutEnabled() && rs == nil {
 		return h.fanoutStreamForward(w, r, reqID, ch, target, chatReq, model, sourceBody, path, targetReq, deepLog)
 	}
-	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
+	if rs == nil {
+		rs = newRetryState(ch)
+	}
 	retryCtx, cancelRetry := rs.withDeadline(r.Context())
 	defer cancelRetry()
 	for {
@@ -141,22 +142,18 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 0)
 			rs.noteFailure(0, true)
-			rs.consecFails++
-			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error()), AffectsChannelHealth: true}
-			}
 			continue
 		}
 		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, time.Since(attemptStart).Milliseconds())
-		if resp.StatusCode == 401 {
+		resultClass := classifyAttempt(resp.StatusCode, nil)
+		if resultClass == attemptUnauthorized {
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 401)
 			rs.noteFailure(401, false)
-			rs.consecFails = 0
 			continue
 		}
-		if resp.StatusCode == 429 {
+		if resultClass == attemptRateLimited {
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 429)
@@ -164,18 +161,14 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			rs.noteFailure(429, false)
 			continue
 		}
-		if resp.StatusCode >= 500 {
+		if resultClass == attemptServerError {
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.noteFailure(resp.StatusCode, true)
-			rs.consecFails++
-			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive upstream failures (last status %d)", ch.Config.ID, rs.consecFails, resp.StatusCode), AffectsChannelHealth: true}
-			}
 			continue
 		}
-		if resp.StatusCode == 400 {
+		if resultClass == attemptMappedBadRequest {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
@@ -185,12 +178,11 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			continue
 		}
-		if resp.StatusCode >= 400 {
+		if resultClass == attemptClientError {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
-			rs.consecFails = 0
 			rs.noteFailure(resp.StatusCode, false)
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, resp.StatusCode, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
@@ -234,7 +226,7 @@ func (h *ProxyHandler) streamFromChatSource(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog) *FailoverError {
+func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Request, reqID string, ch *channel.Channel, source config.InterfaceType, target config.InterfaceType, chatReq *translate.ChatRequest, model string, targetReq interface{}, deepLog *debuglog.RequestLog, rs *RetryState) *FailoverError {
 	sourceReq, err := convertChatToSource(source, chatReq)
 	if err != nil {
 		h.sendError(w, reqID, 400, "convert_to_source_failed", err.Error())
@@ -246,7 +238,9 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 		return handledError(http.StatusInternalServerError, err.Error())
 	}
 	path := upstreamPathForInterface(source, model, true)
-	rs := newRetryState(ch, h.config.Failover.ConsecutiveFailThreshold)
+	if rs == nil {
+		rs = newRetryState(ch)
+	}
 	retryCtx, cancelRetry := rs.withDeadline(r.Context())
 	defer cancelRetry()
 	for {
@@ -277,22 +271,18 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 0)
 			rs.noteFailure(0, true)
-			rs.consecFails++
-			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: 0, Message: fmt.Sprintf("channel %s: connection failed after %d consecutive errors: %s", ch.Config.ID, rs.consecFails, err.Error()), AffectsChannelHealth: true}
-			}
 			continue
 		}
 		h.logChannelResponse(reqID, ch, key.Value, resp.StatusCode, -1, time.Since(attemptStart).Milliseconds())
-		if resp.StatusCode == 401 {
+		resultClass := classifyAttempt(resp.StatusCode, nil)
+		if resultClass == attemptUnauthorized {
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 401)
 			rs.noteFailure(401, false)
-			rs.consecFails = 0
 			continue
 		}
-		if resp.StatusCode == 429 {
+		if resultClass == attemptRateLimited {
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, 429)
@@ -300,18 +290,14 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			rs.noteFailure(429, false)
 			continue
 		}
-		if resp.StatusCode >= 500 {
+		if resultClass == attemptServerError {
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
 			rs.noteFailure(resp.StatusCode, true)
-			rs.consecFails++
-			if rs.consecFails >= rs.consecFailThreshold {
-				return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: %d consecutive upstream failures (last status %d)", ch.Config.ID, rs.consecFails, resp.StatusCode), AffectsChannelHealth: true}
-			}
 			continue
 		}
-		if resp.StatusCode == 400 {
+		if resultClass == attemptMappedBadRequest {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
@@ -321,12 +307,11 @@ func (h *ProxyHandler) streamChainConversion(w http.ResponseWriter, r *http.Requ
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, http.StatusBadRequest, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			continue
 		}
-		if resp.StatusCode >= 400 {
+		if resultClass == attemptClientError {
 			errBodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			ch.RecordLatency(key.Value, time.Since(attemptStart).Milliseconds())
 			ch.ReportError(key.Value, resp.StatusCode)
-			rs.consecFails = 0
 			rs.noteFailure(resp.StatusCode, false)
 			h.logUpstreamHTTPError(reqID, ch, key.Value, model, url, resp.StatusCode, 0, resp.Header, errBodyBytes, readErr, deepLog)
 			return &FailoverError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("channel %s: upstream returned %d", ch.Config.ID, resp.StatusCode)}
